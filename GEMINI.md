@@ -151,32 +151,32 @@ Boris Cherny (creator of Claude Code) keeps his team's file around 100 lines. Un
 **Fill this in per project. Keep it specific. Delete sections that don't apply.**
 
 ### Stack
-- Language and version: Python (`TODO`: version is not specified)
-- Framework(s): PySimpleGUI; NumPy; Matplotlib with the Tk backend; SciPy
+- Language and version: Python 3.14.7
+- Framework(s): tkinter/ttk; NumPy; Matplotlib with the Tk backend; SciPy
 - Package manager: `TODO`
 - Runtime / deployment target: Desktop GUI using PySimpleGUI/Tk
 
 ### Commands
 - Install: `TODO`
 - Build: `TODO`
-- Test (all): `TODO`
-- Test (single file): `TODO`
+- Test (all): `python -m unittest discover -s tests -v`
+- Test (single file): `python tests/test_calculations.py`
 - Lint: `TODO`
 - Typecheck: `TODO`
-- Run locally: `TODO`
+- Run locally: `python main.py`
 
 Prefer single-file or single-test runs during iteration. Full suites are for the final verification pass.
 
 ### Layout
-- Source lives in: project root (`v1_1.py`)
-- Tests live in: `TODO` (no tests found)
+- Source lives in: project root (`main.py`, `calculations.py`, `validation.py`)
+- Tests live in: `tests/`
 - Do not modify: `TODO` (generated code, vendored deps, legacy areas)
 
 ### Conventions specific to this repo
 - Naming: `TODO`
 - Import style: `TODO`
 - Error handling pattern: `TODO`
-- Testing pattern and framework: `TODO`
+- Testing pattern and framework: standard-library `unittest`
 
 ### Forbidden
 - `TODO`: things that look reasonable but will break this project.
