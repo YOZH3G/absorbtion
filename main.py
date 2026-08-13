@@ -7,7 +7,7 @@ from matplotlib.figure import Figure
 from scipy.interpolate import make_interp_spline
 
 from calculations import calculate_xna, calculate_xog, combine_fractions
-from validation import parse_fraction
+from validation import parse_fraction, parse_positive_number
 
 
 BACKGROUND = "#F4F6F8"
@@ -23,14 +23,14 @@ SUCCESS = "#16A34A"
 LEAN_GAS = "lean_gas"
 RICH_ABSORBENT = "rich_absorbent"
 
-GNA = 7800
-XA = 0.5
-XG = 0.5
-GG = 1000
-XOG_INITIAL = 0.8
-XNA_INITIAL = 30
-GOG = (GG * XG) / XOG_INITIAL
-GA = (GNA * XNA_INITIAL) / XA
+DEFAULT_MODEL_VALUES = {
+    "gna": 7800.0,
+    "xa": 0.5,
+    "xg": 0.5,
+    "gg": 1000.0,
+    "xog_initial": 0.8,
+    "xna_initial": 30.0,
+}
 
 
 class AbsorptionApp(ttk.Frame):
@@ -38,6 +38,8 @@ class AbsorptionApp(ttk.Frame):
         super().__init__(root, style="App.TFrame", padding=(20, 16, 20, 12))
         self.root = root
         self.chain = LEAN_GAS
+        self.model_values = DEFAULT_MODEL_VALUES.copy()
+        self.model_dialog = None
 
         self.component_enabled = tk.BooleanVar(value=False)
         self.flow_enabled = tk.BooleanVar(value=False)
@@ -150,13 +152,174 @@ class AbsorptionApp(ttk.Frame):
 
     def _build_chain_card(self, parent):
         card = self._card(parent, 0)
-        ttk.Label(card, text="Цепь управления", style="CardTitle.TLabel").grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 14))
+        ttk.Label(card, text="Цепь управления", style="CardTitle.TLabel").grid(row=0, column=0, sticky="w", pady=(0, 14))
+        ttk.Button(
+            card,
+            text="Параметры модели",
+            command=self._open_model_parameters,
+            style="Toolbar.TButton",
+        ).grid(row=0, column=1, sticky="e", pady=(0, 14))
 
         self.lean_button = ttk.Button(card, text="Обеднённый газ", command=lambda: self._select_chain(LEAN_GAS), style="Segment.TButton")
         self.lean_button.grid(row=1, column=0, sticky="ew")
         self.rich_button = ttk.Button(card, text="Насыщенный абсорбент", command=lambda: self._select_chain(RICH_ABSORBENT), style="Segment.TButton")
         self.rich_button.grid(row=1, column=1, sticky="ew", padx=(4, 0))
         card.columnconfigure((0, 1), weight=1)
+
+    def _open_model_parameters(self):
+        if self.model_dialog is not None and self.model_dialog.winfo_exists():
+            self.model_dialog.lift()
+            self.model_dialog.focus_force()
+            return
+
+        dialog = tk.Toplevel(self.root)
+        self.model_dialog = dialog
+        dialog.title("Параметры математической модели")
+        dialog.configure(background=BACKGROUND)
+        dialog.resizable(False, False)
+        dialog.transient(self.root)
+
+        content = ttk.Frame(dialog, style="App.TFrame", padding=20)
+        content.pack(fill="both", expand=True)
+        content.columnconfigure((0, 1), weight=1)
+
+        ttk.Label(content, text="Параметры математической модели", style="Header.TLabel").grid(
+            row=0, column=0, columnspan=2, sticky="w"
+        )
+        ttk.Label(
+            content,
+            text="Все изменения применяются одновременно. Допустимы конечные числа больше нуля.",
+            style="Status.TLabel",
+        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(4, 16))
+
+        variables = {
+            key: tk.StringVar(value=self._format_number(value))
+            for key, value in self.model_values.items()
+        }
+        errors = {key: tk.StringVar() for key in variables}
+        entries = {}
+
+        gas_specs = (
+            ("gg", "Расход газовой смеси", "Gг"),
+            ("xg", "Доля компонента в исходном газе", "Xг"),
+            ("xog_initial", "Начальная концентрация обеднённого газа", "Xог₀"),
+        )
+        absorbent_specs = (
+            ("gna", "Исходный расход абсорбента", "Gна"),
+            ("xa", "Исходный состав абсорбента", "Xа"),
+            ("xna_initial", "Начальная концентрация насыщенного абсорбента", "Xна₀"),
+        )
+
+        def build_parameter_group(column, title, specs):
+            group = ttk.Frame(content, style="Card.TFrame", padding=(16, 14))
+            group.grid(row=2, column=column, sticky="nsew", padx=(0, 7) if column == 0 else (7, 0))
+            group.columnconfigure(0, weight=1)
+            ttk.Label(group, text=title, style="CardTitle.TLabel").grid(
+                row=0, column=0, columnspan=3, sticky="w", pady=(0, 12)
+            )
+            for index, (key, label, symbol) in enumerate(specs):
+                row = 1 + index * 2
+                ttk.Label(group, text=label, style="Body.TLabel", wraplength=220).grid(row=row, column=0, sticky="w")
+                ttk.Label(group, text=symbol, style="Body.TLabel").grid(row=row, column=1, padx=(10, 8))
+                entry = ttk.Entry(group, textvariable=variables[key], width=11)
+                entry.grid(row=row, column=2, sticky="e")
+                entries[key] = entry
+                ttk.Label(group, textvariable=errors[key], style="Error.TLabel").grid(
+                    row=row + 1, column=0, columnspan=3, sticky="w", pady=(2, 7)
+                )
+
+        build_parameter_group(0, "Газовая часть", gas_specs)
+        build_parameter_group(1, "Абсорбент", absorbent_specs)
+
+        derived = ttk.Frame(content, style="Card.TFrame", padding=(16, 12))
+        derived.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(14, 0))
+        derived.columnconfigure((1, 3), weight=1)
+        ttk.Label(derived, text="Расчётные значения", style="CardTitle.TLabel").grid(
+            row=0, column=0, columnspan=4, sticky="w", pady=(0, 8)
+        )
+        gog_value = tk.StringVar(value="—")
+        ga_value = tk.StringVar(value="—")
+        ttk.Label(derived, text="Gог", style="Body.TLabel").grid(row=1, column=0, sticky="w")
+        ttk.Label(derived, textvariable=gog_value, style="ResultValue.TLabel").grid(row=1, column=1, sticky="w", padx=(8, 28))
+        ttk.Label(derived, text="Gа", style="Body.TLabel").grid(row=1, column=2, sticky="w")
+        ttk.Label(derived, textvariable=ga_value, style="ResultValue.TLabel").grid(row=1, column=3, sticky="w", padx=(8, 0))
+
+        actions = ttk.Frame(content, style="App.TFrame")
+        actions.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(18, 0))
+        actions.columnconfigure(1, weight=1)
+
+        parsed_values = None
+
+        def validate_values(*_):
+            nonlocal parsed_values
+            parsed = {}
+            valid = True
+            for key, variable in variables.items():
+                try:
+                    parsed[key] = parse_positive_number(variable.get())
+                    errors[key].set("")
+                    entries[key].configure(style="TEntry")
+                except ValueError as error:
+                    errors[key].set(str(error))
+                    entries[key].configure(style="Error.TEntry")
+                    valid = False
+
+            if valid:
+                gog = (parsed["gg"] * parsed["xg"]) / parsed["xog_initial"]
+                ga = (parsed["gna"] * parsed["xna_initial"]) / parsed["xa"]
+                gog_value.set(self._format_number(gog))
+                ga_value.set(self._format_number(ga))
+                parsed_values = parsed
+                apply_button.configure(state="normal")
+            else:
+                gog_value.set("—")
+                ga_value.set("—")
+                parsed_values = None
+                apply_button.configure(state="disabled")
+
+        def restore_defaults():
+            for key, value in DEFAULT_MODEL_VALUES.items():
+                variables[key].set(self._format_number(value))
+
+        def close_dialog():
+            if dialog.grab_current() is dialog:
+                dialog.grab_release()
+            self.model_dialog = None
+            dialog.destroy()
+
+        def apply_values():
+            validate_values()
+            if parsed_values is None:
+                return
+            self.model_values = parsed_values.copy()
+            close_dialog()
+            self._reset()
+            self._set_status("Параметры модели обновлены")
+
+        ttk.Button(actions, text="По умолчанию", command=restore_defaults, style="Secondary.TButton").grid(
+            row=0, column=0, sticky="w"
+        )
+        ttk.Button(actions, text="Отмена", command=close_dialog, style="Secondary.TButton").grid(
+            row=0, column=2, padx=(8, 8)
+        )
+        apply_button = ttk.Button(actions, text="Применить", command=apply_values, style="Primary.TButton")
+        apply_button.grid(row=0, column=3)
+
+        for variable in variables.values():
+            variable.trace_add("write", validate_values)
+        validate_values()
+
+        dialog.protocol("WM_DELETE_WINDOW", close_dialog)
+        dialog.bind("<Escape>", lambda _event: close_dialog())
+        dialog.bind("<Return>", lambda _event: apply_values())
+        dialog.update_idletasks()
+        x = self.root.winfo_rootx() + (self.root.winfo_width() - dialog.winfo_reqwidth()) // 2
+        y = self.root.winfo_rooty() + (self.root.winfo_height() - dialog.winfo_reqheight()) // 2
+        dialog.geometry(f"+{max(x, 0)}+{max(y, 0)}")
+        dialog.grab_set()
+        dialog.lift()
+        dialog.focus_force()
+        entries["gg"].focus_set()
 
     def _build_disturbance_card(self, parent):
         card = self._card(parent, 1)
@@ -318,12 +481,34 @@ class AbsorptionApp(ttk.Frame):
 
         combined_fraction = combine_fractions(component_fraction, flow_fraction)
         if self.chain == LEAN_GAS:
-            baseline = XOG_INITIAL
-            calculated = calculate_xog(GG, XG, GOG, component_fraction, flow_fraction)
+            baseline = self.model_values["xog_initial"]
+            gog = (
+                self.model_values["gg"]
+                * self.model_values["xg"]
+                / self.model_values["xog_initial"]
+            )
+            calculated = calculate_xog(
+                self.model_values["gg"],
+                self.model_values["xg"],
+                gog,
+                component_fraction,
+                flow_fraction,
+            )
             transition = calculated
         else:
-            baseline = XNA_INITIAL
-            calculated = calculate_xna(GA, GNA, XA, component_fraction, flow_fraction)
+            baseline = self.model_values["xna_initial"]
+            ga = (
+                self.model_values["gna"]
+                * self.model_values["xna_initial"]
+                / self.model_values["xa"]
+            )
+            calculated = calculate_xna(
+                ga,
+                self.model_values["gna"],
+                self.model_values["xa"],
+                component_fraction,
+                flow_fraction,
+            )
             transition = calculated - 1
 
         self.baseline_result.set(self._format_number(baseline))
@@ -349,7 +534,11 @@ class AbsorptionApp(ttk.Frame):
         self._set_status("Готово к расчёту")
 
     def _draw_static_charts(self):
-        baseline = XOG_INITIAL if self.chain == LEAN_GAS else XNA_INITIAL
+        baseline = (
+            self.model_values["xog_initial"]
+            if self.chain == LEAN_GAS
+            else self.model_values["xna_initial"]
+        )
         self._draw_disturbance(0.0)
         self._style_axis(self.response_axis, "Время", "Концентрация")
         self.response_axis.plot([0, 100], [baseline, baseline], color=ACCENT, linewidth=2)

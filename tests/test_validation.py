@@ -1,6 +1,6 @@
 import unittest
 
-from validation import parse_fraction
+from validation import parse_fraction, parse_positive_number
 
 
 class FractionValidationTests(unittest.TestCase):
@@ -21,6 +21,16 @@ class FractionValidationTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 parse_fraction(value)
 
+
+class PositiveNumberValidationTests(unittest.TestCase):
+    def test_accepts_positive_finite_numbers(self):
+        self.assertEqual(parse_positive_number("0.01"), 0.01)
+        self.assertEqual(parse_positive_number("7800"), 7800.0)
+
+    def test_rejects_empty_non_numeric_non_finite_and_non_positive_values(self):
+        for value in ("", " ", "abc", "nan", "inf", "-1", "0"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                parse_positive_number(value)
 
 if __name__ == "__main__":
     unittest.main()
