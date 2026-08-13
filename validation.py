@@ -1,8 +1,8 @@
 import math
 
 
-MIN_FRACTION = 0.1
-MAX_FRACTION = 9.9
+MIN_FRACTION = 0.01
+MAX_FRACTION = 9.99
 
 
 def parse_fraction(value):
@@ -14,9 +14,9 @@ def parse_fraction(value):
     try:
         fraction = float(text)
     except ValueError as error:
-        raise ValueError("Некорректное значение. Введите число от 0.1 до 9.9.") from error
+        raise ValueError("Некорректное значение. Введите число от 0.01 до 9.99.") from error
 
     if not math.isfinite(fraction) or not MIN_FRACTION <= fraction <= MAX_FRACTION:
-        raise ValueError("Значение должно быть в диапазоне от 0.1 до 9.9.")
+        raise ValueError("Значение должно быть в диапазоне от 0.01 до 9.99.")
 
     return fraction

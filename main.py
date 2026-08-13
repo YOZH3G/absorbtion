@@ -186,7 +186,7 @@ class AbsorptionApp(ttk.Frame):
         self.flow_entry.grid(row=3, column=2, sticky="ew")
         ttk.Label(card, textvariable=self.flow_error, style="Error.TLabel", wraplength=300).grid(row=4, column=0, columnspan=3, sticky="w", pady=(3, 8))
 
-        ttk.Label(card, text="Введите долю: 0.1 = +10%. Допустимый диапазон: 0.1–9.9", style="Muted.TLabel", wraplength=300).grid(
+        ttk.Label(card, text="Введите долю: 0.01 = +1%. Допустимый диапазон: 0.01–9.99", style="Muted.TLabel", wraplength=300).grid(
             row=5, column=0, columnspan=3, sticky="w", pady=(2, 14)
         )
 
