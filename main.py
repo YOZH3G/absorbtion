@@ -4,10 +4,19 @@ from tkinter import ttk
 import numpy as np
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from matplotlib.figure import Figure
-from scipy.interpolate import make_interp_spline
 
-from calculations import calculate_xna, calculate_xog, combine_fractions
-from validation import parse_fraction, parse_positive_number
+from calculations import (
+    IMPULSE,
+    RAMP,
+    RECTANGLE,
+    STEP,
+    calculate_xna,
+    calculate_xog,
+    combine_fractions,
+    disturbance_profile,
+    first_order_response,
+)
+from validation import parse_fraction, parse_nonnegative_number, parse_positive_number
 
 
 BACKGROUND = "#F4F6F8"
@@ -22,6 +31,20 @@ SUCCESS = "#16A34A"
 
 LEAN_GAS = "lean_gas"
 RICH_ABSORBENT = "rich_absorbent"
+
+DISTURBANCE_TYPES = {
+    "Ступенчатое": STEP,
+    "Импульсное": IMPULSE,
+    "Временное прямоугольное": RECTANGLE,
+    "Плавно нарастающее": RAMP,
+}
+
+CURVE_STYLES = {
+    "Исходный режим": ("#667085", "--"),
+    "Только состав": ("#F59E0B", "-"),
+    "Только расход": ("#16A34A", "-"),
+    "Совместное воздействие": (ACCENT, "-"),
+}
 
 DEFAULT_MODEL_VALUES = {
     "gna": 7800.0,
@@ -45,8 +68,15 @@ class AbsorptionApp(ttk.Frame):
         self.flow_enabled = tk.BooleanVar(value=False)
         self.component_value = tk.StringVar()
         self.flow_value = tk.StringVar()
+        self.disturbance_type = tk.StringVar(value="Ступенчатое")
+        self.start_time = tk.StringVar(value="10")
+        self.simulation_duration = tk.StringVar(value="100")
+        self.effect_duration = tk.StringVar(value="10")
+        self.time_constant = tk.StringVar(value="10")
+        self.delay = tk.StringVar(value="0")
         self.component_error = tk.StringVar()
         self.flow_error = tk.StringVar()
+        self.dynamics_error = tk.StringVar()
         self.component_label = tk.StringVar()
         self.component_symbol = tk.StringVar()
         self.flow_label = tk.StringVar()
@@ -64,8 +94,8 @@ class AbsorptionApp(ttk.Frame):
 
     def _configure_window(self):
         self.root.title("Анализ процесса абсорбции")
-        self.root.geometry("1400x850")
-        self.root.minsize(1100, 700)
+        self.root.geometry("1500x920")
+        self.root.minsize(1150, 780)
         self.root.configure(background=BACKGROUND)
         self.pack(fill="both", expand=True)
 
@@ -101,7 +131,7 @@ class AbsorptionApp(ttk.Frame):
         style.map("Toolbar.TButton", background=[("active", "#EEF2F6")])
 
     def _build_layout(self):
-        self.columnconfigure(0, minsize=360)
+        self.columnconfigure(0, minsize=470)
         self.columnconfigure(1, weight=1)
         self.rowconfigure(1, weight=1)
 
@@ -109,9 +139,33 @@ class AbsorptionApp(ttk.Frame):
             row=0, column=0, columnspan=2, sticky="w", pady=(0, 14)
         )
 
-        controls = ttk.Frame(self, style="App.TFrame")
-        controls.grid(row=1, column=0, sticky="nsew", padx=(0, 16))
+        controls_host = ttk.Frame(self, style="App.TFrame")
+        controls_host.grid(row=1, column=0, sticky="nsew", padx=(0, 16))
+        controls_host.columnconfigure(0, weight=1)
+        controls_host.rowconfigure(0, weight=1)
+
+        controls_canvas = tk.Canvas(
+            controls_host,
+            background=BACKGROUND,
+            borderwidth=0,
+            highlightthickness=0,
+        )
+        controls_canvas.grid(row=0, column=0, sticky="nsew")
+        controls_scrollbar = ttk.Scrollbar(controls_host, orient="vertical", command=controls_canvas.yview)
+        controls_scrollbar.grid(row=0, column=1, sticky="ns")
+        controls_canvas.configure(yscrollcommand=controls_scrollbar.set)
+
+        controls = ttk.Frame(controls_canvas, style="App.TFrame")
         controls.columnconfigure(0, weight=1)
+        controls_window = controls_canvas.create_window((0, 0), window=controls, anchor="nw")
+        controls.bind(
+            "<Configure>",
+            lambda _event: controls_canvas.configure(scrollregion=controls_canvas.bbox("all")),
+        )
+        controls_canvas.bind(
+            "<Configure>",
+            lambda event: controls_canvas.itemconfigure(controls_window, width=event.width),
+        )
 
         results = ttk.Frame(self, style="App.TFrame")
         results.grid(row=1, column=1, sticky="nsew")
@@ -349,17 +403,59 @@ class AbsorptionApp(ttk.Frame):
         self.flow_entry.grid(row=3, column=2, sticky="ew")
         ttk.Label(card, textvariable=self.flow_error, style="Error.TLabel", wraplength=300).grid(row=4, column=0, columnspan=3, sticky="w", pady=(3, 8))
 
-        ttk.Label(card, text="Введите долю: 0.01 = +1%. Допустимый диапазон: 0.01–9.99", style="Muted.TLabel", wraplength=300).grid(
+        ttk.Label(card, text="Доля: +0.10 = увеличение на 10%, −0.10 = уменьшение на 10%. Диапазон: −0.99…9.99", style="Muted.TLabel", wraplength=320).grid(
             row=5, column=0, columnspan=3, sticky="w", pady=(2, 14)
         )
 
+        ttk.Separator(card).grid(row=6, column=0, columnspan=3, sticky="ew", pady=(0, 12))
+        ttk.Label(card, text="Параметры времени и формы", style="CardTitle.TLabel").grid(
+            row=7, column=0, columnspan=3, sticky="w", pady=(0, 10)
+        )
+
+        parameters = ttk.Frame(card, style="CardBody.TFrame")
+        parameters.grid(row=8, column=0, columnspan=3, sticky="ew")
+        parameters.columnconfigure((0, 1), weight=1)
+
+        ttk.Label(parameters, text="Вид воздействия", style="Body.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(parameters, text="Начало, с", style="Body.TLabel").grid(row=0, column=1, sticky="w", padx=(10, 0))
+        self.disturbance_type_box = ttk.Combobox(
+            parameters,
+            textvariable=self.disturbance_type,
+            values=tuple(DISTURBANCE_TYPES),
+            state="readonly",
+            width=23,
+        )
+        self.disturbance_type_box.grid(row=1, column=0, sticky="ew", pady=(3, 9))
+        self.disturbance_type_box.bind("<<ComboboxSelected>>", self._update_disturbance_type)
+        self.start_time_entry = ttk.Entry(parameters, textvariable=self.start_time)
+        self.start_time_entry.grid(row=1, column=1, sticky="ew", padx=(10, 0), pady=(3, 9))
+
+        ttk.Label(parameters, text="Длительность моделирования, с", style="Body.TLabel", wraplength=190).grid(row=2, column=0, sticky="w")
+        ttk.Label(parameters, text="Длительность воздействия, с", style="Body.TLabel", wraplength=190).grid(row=2, column=1, sticky="w", padx=(10, 0))
+        self.simulation_duration_entry = ttk.Entry(parameters, textvariable=self.simulation_duration)
+        self.simulation_duration_entry.grid(row=3, column=0, sticky="ew", pady=(3, 9))
+        self.effect_duration_entry = ttk.Entry(parameters, textvariable=self.effect_duration)
+        self.effect_duration_entry.grid(row=3, column=1, sticky="ew", padx=(10, 0), pady=(3, 9))
+
+        ttk.Label(parameters, text="Постоянная времени T, с", style="Body.TLabel").grid(row=4, column=0, sticky="w")
+        ttk.Label(parameters, text="Запаздывание L, с", style="Body.TLabel").grid(row=4, column=1, sticky="w", padx=(10, 0))
+        self.time_constant_entry = ttk.Entry(parameters, textvariable=self.time_constant)
+        self.time_constant_entry.grid(row=5, column=0, sticky="ew", pady=(3, 0))
+        self.delay_entry = ttk.Entry(parameters, textvariable=self.delay)
+        self.delay_entry.grid(row=5, column=1, sticky="ew", padx=(10, 0), pady=(3, 0))
+
+        ttk.Label(card, textvariable=self.dynamics_error, style="Error.TLabel", wraplength=320).grid(
+            row=9, column=0, columnspan=3, sticky="w", pady=(4, 8)
+        )
+
         actions = ttk.Frame(card, style="CardBody.TFrame")
-        actions.grid(row=6, column=0, columnspan=3, sticky="ew")
+        actions.grid(row=10, column=0, columnspan=3, sticky="ew")
         actions.columnconfigure((0, 1), weight=1)
         self.calculate_button = ttk.Button(actions, text="Рассчитать", command=self._calculate, style="Primary.TButton", state="disabled")
         self.calculate_button.grid(row=0, column=0, sticky="ew", padx=(0, 6))
         ttk.Button(actions, text="Сбросить", command=self._reset, style="Secondary.TButton").grid(row=0, column=1, sticky="ew", padx=(6, 0))
         card.columnconfigure(0, weight=1)
+        self._update_disturbance_type()
 
     def _build_result_card(self, parent):
         card = self._card(parent, 2)
@@ -442,6 +538,10 @@ class AbsorptionApp(ttk.Frame):
         self.calculate_button.configure(state="normal" if enabled else "disabled")
         self._clear_errors()
 
+    def _update_disturbance_type(self, _event=None):
+        state = "disabled" if DISTURBANCE_TYPES[self.disturbance_type.get()] == STEP else "normal"
+        self.effect_duration_entry.configure(state=state)
+
     @staticmethod
     def _set_entry_state(entry, enabled, value):
         if enabled:
@@ -453,8 +553,17 @@ class AbsorptionApp(ttk.Frame):
     def _clear_errors(self):
         self.component_error.set("")
         self.flow_error.set("")
+        self.dynamics_error.set("")
         self.component_entry.configure(style="TEntry")
         self.flow_entry.configure(style="TEntry")
+        for entry in (
+            self.start_time_entry,
+            self.simulation_duration_entry,
+            self.effect_duration_entry,
+            self.time_constant_entry,
+            self.delay_entry,
+        ):
+            entry.configure(style="TEntry")
 
     def _read_fraction(self, enabled, value, error_variable, entry):
         if not enabled:
@@ -466,6 +575,50 @@ class AbsorptionApp(ttk.Frame):
             entry.configure(style="Error.TEntry")
             raise
 
+    def _read_dynamic_parameters(self):
+        fields = (
+            ("Начало воздействия", self.start_time, self.start_time_entry, parse_nonnegative_number),
+            ("Длительность моделирования", self.simulation_duration, self.simulation_duration_entry, parse_positive_number),
+            ("Постоянная времени T", self.time_constant, self.time_constant_entry, parse_positive_number),
+            ("Запаздывание L", self.delay, self.delay_entry, parse_nonnegative_number),
+        )
+        parsed = {}
+        for label, variable, entry, parser in fields:
+            try:
+                parsed[label] = parser(variable.get())
+            except ValueError as error:
+                entry.configure(style="Error.TEntry")
+                self.dynamics_error.set(f"{label}: {error}")
+                raise
+
+        kind = DISTURBANCE_TYPES[self.disturbance_type.get()]
+        if kind == STEP:
+            effect_duration = 1.0
+        else:
+            try:
+                effect_duration = parse_positive_number(self.effect_duration.get())
+            except ValueError as error:
+                self.effect_duration_entry.configure(style="Error.TEntry")
+                self.dynamics_error.set(f"Длительность воздействия: {error}")
+                raise
+
+        start_time = parsed["Начало воздействия"]
+        simulation_duration = parsed["Длительность моделирования"]
+        if start_time >= simulation_duration:
+            self.start_time_entry.configure(style="Error.TEntry")
+            self.simulation_duration_entry.configure(style="Error.TEntry")
+            self.dynamics_error.set("Начало воздействия должно быть раньше окончания моделирования.")
+            raise ValueError(self.dynamics_error.get())
+
+        return {
+            "kind": kind,
+            "start_time": start_time,
+            "simulation_duration": simulation_duration,
+            "effect_duration": effect_duration,
+            "time_constant": parsed["Постоянная времени T"],
+            "delay": parsed["Запаздывание L"],
+        }
+
     def _calculate(self):
         self._clear_errors()
         try:
@@ -475,6 +628,7 @@ class AbsorptionApp(ttk.Frame):
             flow_fraction = self._read_fraction(
                 self.flow_enabled.get(), self.flow_value, self.flow_error, self.flow_entry
             )
+            dynamics = self._read_dynamic_parameters()
         except ValueError:
             self._set_status("Исправьте значение", error=True)
             return
@@ -487,14 +641,9 @@ class AbsorptionApp(ttk.Frame):
                 * self.model_values["xg"]
                 / self.model_values["xog_initial"]
             )
-            calculated = calculate_xog(
-                self.model_values["gg"],
-                self.model_values["xg"],
-                gog,
-                component_fraction,
-                flow_fraction,
+            calculator = lambda component, flow: calculate_xog(
+                self.model_values["gg"], self.model_values["xg"], gog, component, flow
             )
-            transition = calculated
         else:
             baseline = self.model_values["xna_initial"]
             ga = (
@@ -502,20 +651,43 @@ class AbsorptionApp(ttk.Frame):
                 * self.model_values["xna_initial"]
                 / self.model_values["xa"]
             )
-            calculated = calculate_xna(
-                ga,
-                self.model_values["gna"],
-                self.model_values["xa"],
-                component_fraction,
-                flow_fraction,
+            calculator = lambda component, flow: calculate_xna(
+                ga, self.model_values["gna"], self.model_values["xa"], component, flow
             )
-            transition = calculated - 1
+
+        calculated = calculator(component_fraction, flow_fraction)
+        time = np.linspace(0.0, dynamics["simulation_duration"], 501)
+        profile = disturbance_profile(
+            time,
+            dynamics["kind"],
+            dynamics["start_time"],
+            dynamics["effect_duration"],
+        )
+        targets = {
+            "Исходный режим": np.full_like(time, baseline),
+            "Только состав": calculator(component_fraction * profile, 0.0),
+            "Только расход": calculator(0.0, flow_fraction * profile),
+            "Совместное воздействие": calculator(
+                component_fraction * profile,
+                flow_fraction * profile,
+            ),
+        }
+        responses = {
+            label: first_order_response(
+                time,
+                baseline,
+                target,
+                dynamics["time_constant"],
+                dynamics["delay"],
+            )
+            for label, target in targets.items()
+        }
 
         self.baseline_result.set(self._format_number(baseline))
         self.disturbance_result.set(f"{self._format_number(combined_fraction)} ({combined_fraction * 100:+.1f}%)")
         self.calculated_result.set(self._format_number(calculated))
-        self._draw_disturbance(combined_fraction)
-        self._draw_response(baseline, calculated, transition)
+        self._draw_disturbance(time, profile, component_fraction, flow_fraction)
+        self._draw_response(time, responses)
         self._set_status("Расчёт выполнен")
 
     def _reset(self):
@@ -539,30 +711,56 @@ class AbsorptionApp(ttk.Frame):
             if self.chain == LEAN_GAS
             else self.model_values["xna_initial"]
         )
-        self._draw_disturbance(0.0)
+        simulation_duration = self._safe_simulation_duration()
+        time = np.linspace(0.0, simulation_duration, 501)
+        self._draw_disturbance(time, np.zeros_like(time), 0.0, 0.0)
         self._style_axis(self.response_axis, "Время", "Концентрация")
-        self.response_axis.plot([0, 100], [baseline, baseline], color=ACCENT, linewidth=2)
+        self.response_axis.plot(
+            [0, simulation_duration],
+            [baseline, baseline],
+            color=CURVE_STYLES["Исходный режим"][0],
+            linestyle=CURVE_STYLES["Исходный режим"][1],
+            linewidth=2,
+            label="Исходный режим",
+        )
+        self.response_axis.legend(loc="best", frameon=False, fontsize=8)
         self.response_canvas.draw_idle()
 
-    def _draw_disturbance(self, combined_fraction):
-        base_level = 3
-        new_level = base_level + combined_fraction
-        self._style_axis(self.disturbance_axis, "Время", "Уровень воздействия")
-        self.disturbance_axis.step([0, 10, 100], [base_level, new_level, new_level], where="post", color=ACCENT, linewidth=2)
+    def _draw_disturbance(self, time, profile, component_fraction, flow_fraction):
+        component_signal = component_fraction * profile
+        flow_signal = flow_fraction * profile
+        combined_signal = (1 + component_signal) * (1 + flow_signal) - 1
+
+        self._style_axis(self.disturbance_axis, "Время, с", "Относительное изменение")
+        self.disturbance_axis.axhline(0.0, color=CURVE_STYLES["Исходный режим"][0], linestyle="--", linewidth=1.5, label="Исходный режим")
+        self.disturbance_axis.plot(time, component_signal, color=CURVE_STYLES["Только состав"][0], linewidth=2, label="Состав")
+        self.disturbance_axis.plot(time, flow_signal, color=CURVE_STYLES["Только расход"][0], linewidth=2, label="Расход")
+        self.disturbance_axis.plot(time, combined_signal, color=CURVE_STYLES["Совместное воздействие"][0], linewidth=2.4, label="Совместно")
         self.disturbance_axis.margins(x=0.02, y=0.15)
+        self.disturbance_axis.legend(loc="best", frameon=False, fontsize=8, ncol=2)
         self.disturbance_canvas.draw_idle()
 
-    def _draw_response(self, baseline, calculated, transition):
-        x = np.arange(0, 101, 10)
-        y = [baseline, baseline, transition] + [calculated] * 8
-        spline = make_interp_spline(x, y, k=2)
-        x_smooth = np.linspace(0, 100, 200)
-        y_smooth = np.maximum(spline(x_smooth), baseline)
-
-        self._style_axis(self.response_axis, "Время", "Концентрация")
-        self.response_axis.plot(x_smooth, y_smooth, color=ACCENT, linewidth=2)
+    def _draw_response(self, time, responses):
+        self._style_axis(self.response_axis, "Время, с", "Концентрация")
+        for label, response in responses.items():
+            color, linestyle = CURVE_STYLES[label]
+            self.response_axis.plot(
+                time,
+                response,
+                color=color,
+                linestyle=linestyle,
+                linewidth=2.4 if label == "Совместное воздействие" else 1.8,
+                label=label,
+            )
         self.response_axis.margins(x=0.02, y=0.12)
+        self.response_axis.legend(loc="best", frameon=False, fontsize=8, ncol=2)
         self.response_canvas.draw_idle()
+
+    def _safe_simulation_duration(self):
+        try:
+            return parse_positive_number(self.simulation_duration.get())
+        except ValueError:
+            return 100.0
 
     @staticmethod
     def _style_axis(axis, x_label, y_label):

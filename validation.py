@@ -1,7 +1,7 @@
 import math
 
 
-MIN_FRACTION = 0.01
+MIN_FRACTION = -0.99
 MAX_FRACTION = 9.99
 
 
@@ -14,10 +14,10 @@ def parse_fraction(value):
     try:
         fraction = float(text)
     except ValueError as error:
-        raise ValueError("Некорректное значение. Введите число от 0.01 до 9.99.") from error
+        raise ValueError("Некорректное значение. Введите число от −0.99 до 9.99.") from error
 
     if not math.isfinite(fraction) or not MIN_FRACTION <= fraction <= MAX_FRACTION:
-        raise ValueError("Значение должно быть в диапазоне от 0.01 до 9.99.")
+        raise ValueError("Значение должно быть в диапазоне от −0.99 до 9.99.")
 
     return fraction
 
@@ -35,5 +35,22 @@ def parse_positive_number(value):
 
     if not math.isfinite(number) or number <= 0:
         raise ValueError("Значение должно быть больше нуля.")
+
+    return number
+
+
+def parse_nonnegative_number(value):
+    """Parse a finite number greater than or equal to zero."""
+    text = value.strip()
+    if not text:
+        raise ValueError("Введите значение.")
+
+    try:
+        number = float(text)
+    except ValueError as error:
+        raise ValueError("Введите корректное число.") from error
+
+    if not math.isfinite(number) or number < 0:
+        raise ValueError("Значение не может быть отрицательным.")
 
     return number

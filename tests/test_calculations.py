@@ -1,6 +1,18 @@
 import unittest
 
-from calculations import calculate_xna, calculate_xog, combine_fractions
+import numpy as np
+
+from calculations import (
+    IMPULSE,
+    RAMP,
+    RECTANGLE,
+    STEP,
+    calculate_xna,
+    calculate_xog,
+    combine_fractions,
+    disturbance_profile,
+    first_order_response,
+)
 
 
 class CalculationTests(unittest.TestCase):
@@ -30,6 +42,63 @@ class CalculationTests(unittest.TestCase):
             calculate_xna(self.ga, self.gna, self.xa, k_xa=0.1, k_ga=0.1),
             36.3,
         )
+
+    def test_negative_disturbances_reduce_the_result(self):
+        self.assertAlmostEqual(combine_fractions(-0.1, -0.2), -0.28)
+        self.assertAlmostEqual(
+            calculate_xog(self.gg, self.xg, self.gog, k_xg=-0.1, k_gg=-0.2),
+            0.576,
+        )
+
+
+class DynamicModelTests(unittest.TestCase):
+    def setUp(self):
+        self.time = np.linspace(0.0, 20.0, 201)
+
+    def test_step_profile_starts_at_requested_time(self):
+        profile = disturbance_profile(self.time, STEP, start_time=5.0, duration=2.0)
+        self.assertTrue(np.all(profile[self.time < 5.0] == 0.0))
+        self.assertTrue(np.all(profile[self.time >= 5.0] == 1.0))
+
+    def test_impulse_is_a_bounded_temporary_half_sine(self):
+        profile = disturbance_profile(self.time, IMPULSE, start_time=5.0, duration=4.0)
+        self.assertTrue(np.all(profile[(self.time < 5.0) | (self.time > 9.0)] == 0.0))
+        self.assertAlmostEqual(profile[np.argmin(np.abs(self.time - 7.0))], 1.0)
+
+    def test_rectangle_returns_to_zero_after_duration(self):
+        profile = disturbance_profile(self.time, RECTANGLE, start_time=5.0, duration=4.0)
+        self.assertTrue(np.all(profile[(self.time >= 5.0) & (self.time < 9.0)] == 1.0))
+        self.assertTrue(np.all(profile[self.time >= 9.0] == 0.0))
+
+    def test_ramp_reaches_and_keeps_full_amplitude(self):
+        profile = disturbance_profile(self.time, RAMP, start_time=5.0, duration=4.0)
+        self.assertAlmostEqual(profile[np.argmin(np.abs(self.time - 7.0))], 0.5)
+        self.assertTrue(np.all(profile[self.time >= 9.0] == 1.0))
+
+    def test_first_order_step_matches_analytical_solution(self):
+        time = np.linspace(0.0, 10.0, 101)
+        profile = disturbance_profile(time, STEP, start_time=2.0, duration=1.0)
+        response = first_order_response(
+            time,
+            baseline=10.0,
+            target=10.0 + 10.0 * profile,
+            time_constant=2.0,
+        )
+        expected = 10.0 + 10.0 * (1.0 - np.exp(-(time - 2.0) / 2.0))
+        expected[time < 2.0] = 10.0
+        np.testing.assert_allclose(response, expected, rtol=0.0, atol=1e-12)
+
+    def test_dead_time_delays_the_response(self):
+        profile = disturbance_profile(self.time, STEP, start_time=2.0, duration=1.0)
+        response = first_order_response(
+            self.time,
+            baseline=10.0,
+            target=10.0 + 10.0 * profile,
+            time_constant=2.0,
+            delay=3.0,
+        )
+        self.assertTrue(np.all(response[self.time < 5.0] == 10.0))
+        self.assertGreater(response[self.time > 5.0][0], 10.0)
 
 
 if __name__ == "__main__":
