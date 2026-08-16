@@ -4,3 +4,6 @@ AGENTS.md
 CLAUDE.md
 GEMINI.md
 scenarios.json
+.venv/
+build/
+dist/

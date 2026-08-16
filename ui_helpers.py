@@ -1,0 +1,421 @@
+import math
+import tkinter as tk
+from tkinter import ttk
+
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from matplotlib.figure import Figure
+
+
+ICON_PATTERNS = {
+    "disturbances": (
+        "................",
+        "................",
+        "..........##....",
+        ".........#..#...",
+        ".........#..#...",
+        "........#....#..",
+        "..#.....#....#..",
+        "..#....#......#.",
+        ".#.#....#......#",
+        ".#..#..#........",
+        "#...#..#........",
+        "#....##.........",
+        "................",
+        "................",
+        "................",
+        "................",
+    ),
+    "dynamics": (
+        ".....######.....",
+        "...##......##...",
+        "..#..........#..",
+        ".#.....##.....#.",
+        ".#.....##.....#.",
+        "#......##......#",
+        "#......##......#",
+        "#......#####...#",
+        "#..........#...#",
+        "#..............#",
+        ".#............#.",
+        ".#............#.",
+        "..#..........#..",
+        "...##......##...",
+        ".....######.....",
+        "................",
+    ),
+    "results": (
+        "................",
+        "...........###..",
+        "...........###..",
+        "...........###..",
+        ".......###.###..",
+        ".......###.###..",
+        ".......###.###..",
+        "...###.###.###..",
+        "...###.###.###..",
+        "...###.###.###..",
+        "...###.###.###..",
+        ".##############.",
+        ".##############.",
+        "................",
+        "................",
+        "................",
+    ),
+    "controller": (
+        "................",
+        "...##...........",
+        ".######.........",
+        "...##...........",
+        "...##...........",
+        "...##......##...",
+        "..........######",
+        "............##..",
+        "............##..",
+        "......##....##..",
+        "....######......",
+        "......##........",
+        "......##........",
+        "......##........",
+        "................",
+        "................",
+    ),
+    "scenarios": (
+        "................",
+        "....########....",
+        "....#......#....",
+        ".##.#......#....",
+        ".##.#.####.#....",
+        "....#......#....",
+        "....#.####.#....",
+        ".##.#......#....",
+        ".##.#.####.#....",
+        "....#......#....",
+        "....#.####.#....",
+        "....#......#....",
+        "....########....",
+        "................",
+        "................",
+        "................",
+    ),
+    "comparison": (
+        "................",
+        "............##..",
+        "...........#..#.",
+        "..........#....#",
+        "..##.....#......",
+        ".#..#....#......",
+        "#....#..#.......",
+        "......##........",
+        ".....#..#.......",
+        "....#....#......",
+        "...#......#.....",
+        "..#........#....",
+        ".#..........#...",
+        "................",
+        "................",
+        "................",
+    ),
+    "export": (
+        ".......##.......",
+        ".......##.......",
+        ".......##.......",
+        ".......##.......",
+        ".......##.......",
+        "..##...##...##..",
+        "...##..##..##...",
+        "....##.##.##....",
+        ".....######.....",
+        "......####......",
+        ".......##.......",
+        "................",
+        ".##############.",
+        ".#............#.",
+        ".##############.",
+        "................",
+    ),
+}
+
+
+DISTURBANCE_HELP = {
+    "Ступенчатое": (
+        "Ступенчатое воздействие",
+        "В момент t₀ сигнал скачком достигает заданной величины и сохраняется до конца моделирования.",
+        "step",
+    ),
+    "Импульсное": (
+        "Импульсное воздействие",
+        "После t₀ возникает кратковременный полусинусоидальный импульс заданной длительности.",
+        "impulse",
+    ),
+    "Временное прямоугольное": (
+        "Временное прямоугольное воздействие",
+        "Сигнал включается в t₀, остаётся постоянным заданное время, затем возвращается к нулю.",
+        "rectangle",
+    ),
+    "Плавно нарастающее": (
+        "Плавно нарастающее воздействие",
+        "Начиная с t₀ сигнал линейно растёт и достигает полной величины за указанное время.",
+        "ramp",
+    ),
+}
+
+
+FORMULAS = {
+    "P": r"$u(t)=K\,e(t)$",
+    "PI": r"$u(t)=K\left(e(t)+\frac{1}{T_i}\int_0^t e(\tau)\,d\tau\right)$",
+    "PD": r"$u(t)=K\left(e(t)-T_d\frac{dy(t)}{dt}\right)$",
+    "PID": r"$u(t)=K\left(e(t)+\frac{1}{T_i}\int_0^t e(\tau)\,d\tau-T_d\frac{dy(t)}{dt}\right)$",
+}
+
+
+def create_icon(master, name, color="#E5ECF5"):
+    pattern = ICON_PATTERNS[name]
+    image = tk.PhotoImage(master=master, width=len(pattern[0]), height=len(pattern))
+    for y, row in enumerate(pattern):
+        for x, pixel in enumerate(row):
+            if pixel == "#":
+                image.put(color, (x, y))
+    return image
+
+
+class DisturbanceTooltip:
+    def __init__(self, widget, value_getter, delay=450):
+        self.widget = widget
+        self.value_getter = value_getter
+        self.delay = delay
+        self._after_id = None
+        self._window = None
+        widget.bind("<Enter>", self._schedule, add="+")
+        widget.bind("<Leave>", self._hide, add="+")
+        widget.bind("<FocusIn>", self._schedule, add="+")
+        widget.bind("<FocusOut>", self._hide, add="+")
+
+    def _schedule(self, _event=None):
+        self._cancel()
+        self._after_id = self.widget.after(self.delay, self._show)
+
+    def _show(self):
+        self._after_id = None
+        help_content = DISTURBANCE_HELP.get(self.value_getter())
+        if help_content is None or self._window is not None:
+            return
+        title, description, shape = help_content
+        window = tk.Toplevel(self.widget)
+        window.overrideredirect(True)
+        window.attributes("-topmost", True)
+        frame = ttk.Frame(window, style="Card.TFrame", padding=(12, 10))
+        frame.pack(fill="both", expand=True)
+        ttk.Label(frame, text=title, style="CardTitle.TLabel").grid(
+            row=0, column=0, sticky="w"
+        )
+        canvas = tk.Canvas(
+            frame,
+            width=190,
+            height=52,
+            background="#FFFFFF",
+            highlightthickness=0,
+        )
+        canvas.grid(row=1, column=0, sticky="ew", pady=(6, 4))
+        self._draw_profile(canvas, shape)
+        ttk.Label(
+            frame,
+            text=description,
+            style="Body.TLabel",
+            wraplength=260,
+            justify="left",
+        ).grid(row=2, column=0, sticky="w")
+        x = self.widget.winfo_rootx()
+        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 6
+        window.geometry(f"+{x}+{y}")
+        self._window = window
+
+    def _hide(self, _event=None):
+        self._cancel()
+        if self._window is not None:
+            self._window.destroy()
+            self._window = None
+
+    def _cancel(self):
+        if self._after_id is not None:
+            self.widget.after_cancel(self._after_id)
+            self._after_id = None
+
+    @staticmethod
+    def _draw_profile(canvas, shape):
+        width = 190
+        baseline = 42
+        top = 10
+        start = 52
+        canvas.create_line(8, baseline, width - 8, baseline, fill="#98A2B3", width=1)
+        canvas.create_line(start, 5, start, 47, fill="#D0D5DD", dash=(3, 3))
+        if shape == "step":
+            points = (8, baseline, start, baseline, start, top, width - 8, top)
+        elif shape == "rectangle":
+            end = 135
+            points = (8, baseline, start, baseline, start, top, end, top, end, baseline, width - 8, baseline)
+        elif shape == "ramp":
+            end = 135
+            points = (8, baseline, start, baseline, end, top, width - 8, top)
+        else:
+            points = [(8, baseline), (start, baseline)]
+            for index in range(31):
+                fraction = index / 30.0
+                points.append(
+                    (
+                        start + fraction * 90,
+                        baseline - math.sin(math.pi * fraction) * (baseline - top),
+                    )
+                )
+            points.append((width - 8, baseline))
+            points = tuple(coordinate for point in points for coordinate in point)
+        canvas.create_line(*points, fill="#2563EB", width=2.5)
+        canvas.create_text(start + 2, 48, text="t₀", fill="#667085", anchor="nw")
+
+
+class TextTooltip:
+    def __init__(self, widget, text, delay=450):
+        self.widget = widget
+        self.text = text
+        self.delay = delay
+        self._after_id = None
+        self._window = None
+        widget.bind("<Enter>", self._schedule, add="+")
+        widget.bind("<Leave>", self._hide, add="+")
+        widget.bind("<FocusIn>", self._schedule, add="+")
+        widget.bind("<FocusOut>", self._hide, add="+")
+
+    def _schedule(self, _event=None):
+        self._cancel()
+        self._after_id = self.widget.after(self.delay, self._show)
+
+    def _show(self):
+        self._after_id = None
+        if self._window is not None:
+            return
+        window = tk.Toplevel(self.widget)
+        window.overrideredirect(True)
+        window.attributes("-topmost", True)
+        frame = ttk.Frame(window, style="Card.TFrame", padding=(10, 8))
+        frame.pack(fill="both", expand=True)
+        ttk.Label(
+            frame,
+            text=self.text,
+            style="Body.TLabel",
+            wraplength=280,
+            justify="left",
+        ).pack()
+        x = self.widget.winfo_rootx()
+        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 5
+        window.geometry(f"+{x}+{y}")
+        self._window = window
+
+    def _hide(self, _event=None):
+        self._cancel()
+        if self._window is not None:
+            self._window.destroy()
+            self._window = None
+
+    def _cancel(self):
+        if self._after_id is not None:
+            self.widget.after_cancel(self._after_id)
+            self._after_id = None
+
+
+class FormulaPanel(ttk.Frame):
+    def __init__(self, parent, background="#FFFFFF"):
+        super().__init__(parent, style="CardBody.TFrame")
+        self.figure = Figure(
+            figsize=(3.25, 1.72),
+            dpi=110,
+            facecolor=background,
+            constrained_layout=True,
+        )
+        self.axis = self.figure.add_subplot(111)
+        self.axis.set_axis_off()
+        self.canvas = FigureCanvasTkAgg(self.figure, master=self)
+        self.canvas.get_tk_widget().pack(fill="both", expand=True)
+
+    def set_controller_type(self, controller_type):
+        self.axis.clear()
+        self.axis.set_axis_off()
+        self.axis.text(
+            0.02,
+            0.84,
+            r"$T\,\frac{dy(t)}{dt}+y(t)=y_{\mathrm{уст}}(t)$",
+            fontsize=13,
+            color="#1F2937",
+            va="center",
+        )
+        formula_size = 10.5 if controller_type == "PID" else 12.5
+        self.axis.text(
+            0.02,
+            0.57,
+            FORMULAS[controller_type],
+            fontsize=formula_size,
+            color="#1F2937",
+            va="center",
+        )
+        self.axis.text(
+            0.02,
+            0.29,
+            r"$\lambda=\max(0.5T,L),\qquad K=\frac{T}{\lambda+L}$",
+            fontsize=10.5,
+            color="#1F2937",
+            va="center",
+        )
+        self.axis.text(
+            0.02,
+            0.08,
+            r"$T_i=\min\!\left(T,4(\lambda+L)\right),\qquad T_d=\frac{L}{3}$",
+            fontsize=10.5,
+            color="#1F2937",
+            va="center",
+        )
+        self.canvas.draw_idle()
+
+
+class ScrollablePage(ttk.Frame):
+    def __init__(self, parent, background="#F4F6F8"):
+        super().__init__(parent, style="App.TFrame")
+        self.columnconfigure(0, weight=1)
+        self.rowconfigure(0, weight=1)
+        self.canvas = tk.Canvas(
+            self,
+            background=background,
+            borderwidth=0,
+            highlightthickness=0,
+        )
+        self.canvas.grid(row=0, column=0, sticky="nsew")
+        scrollbar = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        self.canvas.configure(yscrollcommand=scrollbar.set)
+        self.content = ttk.Frame(self.canvas, style="App.TFrame")
+        self.content.columnconfigure(0, weight=1)
+        self._window_id = self.canvas.create_window(
+            (0, 0),
+            window=self.content,
+            anchor="nw",
+        )
+        self.content.bind("<Configure>", self._update_scroll_region)
+        self.canvas.bind("<Configure>", self._fit_content_width)
+
+    def bind_mousewheel(self):
+        self.canvas.bind("<MouseWheel>", self._on_mousewheel, add="+")
+        self._bind_descendants(self.content)
+
+    def scroll_to_top(self):
+        self.canvas.yview_moveto(0.0)
+
+    def _update_scroll_region(self, _event=None):
+        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+
+    def _fit_content_width(self, event):
+        self.canvas.itemconfigure(self._window_id, width=event.width)
+
+    def _on_mousewheel(self, event):
+        self.canvas.yview_scroll(int(-event.delta / 120), "units")
+
+    def _bind_descendants(self, widget):
+        widget.bind("<MouseWheel>", self._on_mousewheel, add="+")
+        for child in widget.winfo_children():
+            self._bind_descendants(child)

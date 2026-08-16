@@ -22,6 +22,9 @@ class ScenarioEditorDialog(tk.Toplevel):
         self._on_close = on_close
         self._original_name = None
         self._editable = False
+        self._dirty = False
+        self._loading_form = False
+        self._current_list_index = None
         self._scenario_names = []
         self._normal_widgets = []
         self._readonly_widgets = []
@@ -51,6 +54,12 @@ class ScenarioEditorDialog(tk.Toplevel):
         }
         self._status = tk.StringVar()
         self._source = tk.StringVar()
+        self._search = tk.StringVar()
+        self._filter = tk.StringVar(value="Все")
+        self._sort = tk.StringVar(value="Как задано")
+        self._loaded_values = None
+        self._field_widgets = {}
+        self._field_errors = {}
 
         self.title("Редактор лабораторных сценариев")
         self.geometry("1180x780")
@@ -58,6 +67,10 @@ class ScenarioEditorDialog(tk.Toplevel):
         self.configure(background=background)
         self.transient(parent)
         self._build_content()
+        for variable in self._variables.values():
+            variable.trace_add("write", self._mark_dirty)
+        self._search.trace_add("write", self._apply_list_filter)
+        self._sort.trace_add("write", self._apply_list_filter)
         self._refresh_list()
         self.protocol("WM_DELETE_WINDOW", self._close)
         self.bind("<Escape>", lambda _event: self._close())
@@ -80,13 +93,31 @@ class ScenarioEditorDialog(tk.Toplevel):
 
         list_card = ttk.Frame(content, style="Card.TFrame", padding=(12, 12))
         list_card.grid(row=1, column=0, sticky="nsew", pady=(14, 0), padx=(0, 12))
-        list_card.rowconfigure(1, weight=1)
+        list_card.rowconfigure(4, weight=1)
         list_card.columnconfigure(0, weight=1)
         ttk.Label(list_card, text="Сценарии", style="CardTitle.TLabel").grid(
             row=0, column=0, sticky="w", pady=(0, 8)
         )
+        search_entry = ttk.Entry(list_card, textvariable=self._search)
+        search_entry.grid(row=1, column=0, sticky="ew", pady=(0, 8))
+        filter_box = ttk.Combobox(
+            list_card,
+            textvariable=self._filter,
+            values=("Все", "Встроенные", "Пользовательские"),
+            state="readonly",
+        )
+        filter_box.grid(row=2, column=0, sticky="ew", pady=(0, 8))
+        filter_box.bind("<<ComboboxSelected>>", self._apply_list_filter)
+        sort_box = ttk.Combobox(
+            list_card,
+            textvariable=self._sort,
+            values=("Как задано", "По названию"),
+            state="readonly",
+        )
+        sort_box.grid(row=3, column=0, sticky="ew", pady=(0, 8))
+        sort_box.bind("<<ComboboxSelected>>", self._apply_list_filter)
         list_host = ttk.Frame(list_card, style="CardBody.TFrame")
-        list_host.grid(row=1, column=0, sticky="nsew")
+        list_host.grid(row=4, column=0, sticky="nsew")
         list_host.rowconfigure(0, weight=1)
         list_host.columnconfigure(0, weight=1)
         self._listbox = tk.Listbox(
@@ -116,7 +147,7 @@ class ScenarioEditorDialog(tk.Toplevel):
         self._listbox.bind("<<ListboxSelect>>", self._select_from_list)
 
         list_actions = ttk.Frame(list_card, style="CardBody.TFrame")
-        list_actions.grid(row=2, column=0, sticky="ew", pady=(10, 0))
+        list_actions.grid(row=5, column=0, sticky="ew", pady=(10, 0))
         list_actions.columnconfigure((0, 1), weight=1)
         ttk.Button(
             list_actions,
@@ -142,6 +173,24 @@ class ScenarioEditorDialog(tk.Toplevel):
             command=self._export_bundle,
             style="Secondary.TButton",
         ).grid(row=1, column=1, sticky="ew", padx=(4, 0), pady=(8, 0))
+        ttk.Button(
+            list_actions,
+            text="↑ Выше",
+            command=lambda: self._move_selected_scenario(-1),
+            style="Secondary.TButton",
+        ).grid(row=2, column=0, sticky="ew", padx=(0, 4), pady=(8, 0))
+        ttk.Button(
+            list_actions,
+            text="↓ Ниже",
+            command=lambda: self._move_selected_scenario(1),
+            style="Secondary.TButton",
+        ).grid(row=2, column=1, sticky="ew", padx=(4, 0), pady=(8, 0))
+        ttk.Label(
+            list_card,
+            text=f"Формат JSON v1\n{self.store.path}",
+            style="Muted.TLabel",
+            wraplength=245,
+        ).grid(row=6, column=0, sticky="w", pady=(10, 0))
 
         form = ttk.Frame(content, style="Card.TFrame", padding=(16, 14))
         form.grid(row=1, column=1, sticky="nsew", pady=(14, 0))
@@ -175,34 +224,54 @@ class ScenarioEditorDialog(tk.Toplevel):
 
         actions = ttk.Frame(form, style="CardBody.TFrame")
         actions.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(12, 0))
-        actions.columnconfigure(2, weight=1)
+        actions.columnconfigure((0, 1, 2, 3), weight=1)
         self._delete_button = ttk.Button(
             actions,
             text="Удалить",
             command=self._delete_scenario,
             style="Secondary.TButton",
         )
-        self._delete_button.grid(row=0, column=0, padx=(0, 8))
+        self._delete_button.grid(row=0, column=0, sticky="ew", padx=(0, 4))
+        self._validate_button = ttk.Button(
+            actions,
+            text="Проверить поля",
+            command=self._validate_scenario,
+            style="Secondary.TButton",
+        )
+        self._validate_button.grid(row=0, column=1, sticky="ew", padx=4)
         self._preview_button = ttk.Button(
             actions,
-            text="Проверить в расчёте",
+            text="Открыть в расчёте",
             command=self._preview_scenario,
             style="Secondary.TButton",
         )
-        self._preview_button.grid(row=0, column=1)
+        self._preview_button.grid(row=0, column=2, sticky="ew", padx=4)
+        ttk.Button(
+            actions,
+            text="Отменить изменения",
+            command=self._revert_changes,
+            style="Secondary.TButton",
+        ).grid(row=0, column=3, sticky="ew", padx=(4, 0))
         ttk.Button(
             actions,
             text="Закрыть",
             command=self._close,
             style="Secondary.TButton",
-        ).grid(row=0, column=3, padx=(8, 8))
+        ).grid(row=1, column=0, sticky="ew", pady=(8, 0), padx=(0, 4))
+        self._save_as_button = ttk.Button(
+            actions,
+            text="Сохранить как новый",
+            command=self._save_as_new,
+            style="Secondary.TButton",
+        )
+        self._save_as_button.grid(row=1, column=2, sticky="ew", pady=(8, 0), padx=4)
         self._save_button = ttk.Button(
             actions,
             text="Сохранить",
             command=self._save_scenario,
             style="Primary.TButton",
         )
-        self._save_button.grid(row=0, column=4)
+        self._save_button.grid(row=1, column=3, sticky="ew", pady=(8, 0), padx=(4, 0))
 
     def _build_general_tab(self, tab):
         tab.columnconfigure(1, weight=1)
@@ -286,6 +355,10 @@ class ScenarioEditorDialog(tk.Toplevel):
         entry = ttk.Entry(parent, textvariable=self._variables[key])
         entry.grid(row=row, column=1, sticky="ew", pady=6)
         self._normal_widgets.append(entry)
+        self._field_widgets[key] = entry
+        error = ttk.Label(parent, text="", style="Error.TLabel", wraplength=180)
+        error.grid(row=row, column=2, sticky="w", pady=6, padx=(8, 0))
+        self._field_errors[key] = error
         return entry
 
     def _combobox(self, parent, row, label, key, values):
@@ -300,34 +373,72 @@ class ScenarioEditorDialog(tk.Toplevel):
         )
         widget.grid(row=row, column=1, sticky="ew", pady=6)
         self._readonly_widgets.append(widget)
+        self._field_widgets[key] = widget
+        error = ttk.Label(parent, text="", style="Error.TLabel", wraplength=180)
+        error.grid(row=row, column=2, sticky="w", pady=6, padx=(8, 0))
+        self._field_errors[key] = error
         return widget
 
-    def _refresh_list(self, selected_name=None):
-        scenarios = self.store.scenarios
+    def _refresh_list(self, selected_name=None, load_selection=True):
+        scenarios = self._filtered_scenarios()
         self._scenario_names = [scenario["name"] for scenario in scenarios]
         self._listbox.delete(0, tk.END)
         for scenario in scenarios:
             marker = "[встроенный] " if self.store.is_builtin(scenario["name"]) else "[мой] "
             self._listbox.insert(tk.END, marker + scenario["name"])
         if not scenarios:
-            self._new_scenario()
+            self._current_list_index = None
             return
         if selected_name not in self._scenario_names:
             selected_name = self._scenario_names[0]
         index = self._scenario_names.index(selected_name)
         self._listbox.selection_set(index)
         self._listbox.see(index)
-        self._load_scenario(scenarios[index])
+        self._current_list_index = index
+        if load_selection:
+            self._load_scenario(scenarios[index])
+
+    def _filtered_scenarios(self):
+        query = self._search.get().strip().casefold()
+        source_filter = self._filter.get()
+        scenarios = []
+        for scenario in self.store.scenarios:
+            builtin = self.store.is_builtin(scenario["name"])
+            if source_filter == "Встроенные" and not builtin:
+                continue
+            if source_filter == "Пользовательские" and builtin:
+                continue
+            searchable = f"{scenario['name']} {scenario['description']}".casefold()
+            if query and query not in searchable:
+                continue
+            scenarios.append(scenario)
+        if self._sort.get() == "По названию":
+            scenarios.sort(key=lambda scenario: scenario["name"].casefold())
+        return scenarios
+
+    def _apply_list_filter(self, _event=None, *_):
+        selected_name = self._original_name
+        self._refresh_list(selected_name, load_selection=not self._dirty)
 
     def _select_from_list(self, _event=None):
         selection = self._listbox.curselection()
         if not selection:
             return
-        name = self._scenario_names[selection[0]]
+        index = selection[0]
+        if index == self._current_list_index:
+            return
+        if not self._confirm_discard():
+            self._listbox.selection_clear(0, tk.END)
+            if self._current_list_index is not None:
+                self._listbox.selection_set(self._current_list_index)
+            return
+        name = self._scenario_names[index]
         scenario = next(item for item in self.store.scenarios if item["name"] == name)
+        self._current_list_index = index
         self._load_scenario(scenario)
 
     def _load_scenario(self, scenario, original_name=None):
+        self._loading_form = True
         controller = scenario["controller"]
         values = {
             "name": scenario["name"],
@@ -354,14 +465,94 @@ class ScenarioEditorDialog(tk.Toplevel):
         }
         for key, value in values.items():
             self._variables[key].set(value)
+        self._loading_form = False
         self._original_name = scenario["name"] if original_name is None else original_name
         builtin = self.store.is_builtin(self._original_name)
         self._set_editable(not builtin)
+        self._dirty = False
+        self._loaded_values = values.copy()
+        self._clear_field_errors()
+        self._update_field_styles()
         self._source.set("Встроенный · только просмотр" if builtin else "Пользовательский · можно редактировать")
         self._status.set(
             "Создайте копию, чтобы изменить встроенный сценарий."
             if builtin
             else "Изменения ещё не сохранены."
+        )
+
+    def _mark_dirty(self, *_):
+        if self._loading_form or not self._editable:
+            return
+        current_values = {key: variable.get() for key, variable in self._variables.items()}
+        self._dirty = self._loaded_values is None or current_values != self._loaded_values
+        self._update_field_styles()
+        if not self._dirty:
+            self._source.set("Пользовательский · можно редактировать")
+            self._status.set("Изменения совпадают с сохранённой версией.")
+            return
+        if self._original_name is None:
+            self._source.set("● Новый пользовательский сценарий")
+        else:
+            self._source.set("● Пользовательский · есть несохранённые изменения")
+        self._status.set("Есть несохранённые изменения.")
+
+    def _update_field_styles(self):
+        if self._loaded_values is None:
+            return
+        for key, widget in self._field_widgets.items():
+            changed = self._variables[key].get() != self._loaded_values.get(key)
+            if isinstance(widget, ttk.Combobox):
+                widget.configure(style="Dirty.TCombobox" if changed else "TCombobox")
+            else:
+                widget.configure(style="Dirty.TEntry" if changed else "TEntry")
+
+    def _clear_field_errors(self):
+        for label in self._field_errors.values():
+            label.configure(text="")
+
+    def _show_validation_error(self, error):
+        self._clear_field_errors()
+        message = str(error)
+        labels = {
+            "Название": "name", "Описание": "description", "Состав": "component",
+            "Расход": "flow", "Цепь управления": "chain",
+            "Начало воздействия": "start_time",
+            "Длительность моделирования": "simulation_duration",
+            "Длительность воздействия": "effect_duration",
+            "Постоянная времени T": "time_constant", "Запаздывание L": "delay",
+            "Допуск прогноза": "steady_tolerance_percent",
+            "Коэффициент K": "gain", "Время интегрирования Ti": "integral_time",
+            "Время дифференцирования Td": "derivative_time",
+            "Ограничение управляющего воздействия": "control_limit",
+            "Заданное значение": "setpoint",
+        }
+        key = labels.get(message.partition(":")[0])
+        if key is None:
+            key = next(
+                (field_key for label, field_key in labels.items() if message.startswith(label)),
+                None,
+            )
+        if key in self._field_errors:
+            self._field_errors[key].configure(text=message)
+        self._status.set(message)
+
+    def _validate_scenario(self):
+        try:
+            self._collect_scenario()
+        except ValueError as error:
+            self._show_validation_error(error)
+            return False
+        self._clear_field_errors()
+        self._status.set("Параметры корректны. Сценарий можно сохранить или открыть в расчёте.")
+        return True
+
+    def _confirm_discard(self):
+        if not self._dirty:
+            return True
+        return messagebox.askyesno(
+            "Несохранённые изменения",
+            "Отменить несохранённые изменения сценария?",
+            parent=self,
         )
 
     def _set_editable(self, editable):
@@ -411,6 +602,8 @@ class ScenarioEditorDialog(tk.Toplevel):
         )
 
     def _new_scenario(self):
+        if not self._confirm_discard():
+            return
         name = self._unique_name("Новый сценарий")
         scenario = {
             "name": name,
@@ -428,8 +621,10 @@ class ScenarioEditorDialog(tk.Toplevel):
             "steady_tolerance_percent": 5.0,
         }
         self._listbox.selection_clear(0, tk.END)
+        self._current_list_index = None
         self._load_scenario(scenario, original_name=None)
-        self._source.set("Новый пользовательский сценарий")
+        self._dirty = True
+        self._source.set("● Новый пользовательский сценарий")
         self._status.set("Заполните параметры и сохраните сценарий.")
 
     def _duplicate_scenario(self):
@@ -441,8 +636,10 @@ class ScenarioEditorDialog(tk.Toplevel):
         duplicate = copy.deepcopy(scenario)
         duplicate["name"] = self._unique_name(f"Копия — {scenario['name']}")
         self._listbox.selection_clear(0, tk.END)
+        self._current_list_index = None
         self._load_scenario(duplicate, original_name=None)
-        self._source.set("Копия · новый пользовательский сценарий")
+        self._dirty = True
+        self._source.set("● Копия · новый пользовательский сценарий")
         self._status.set("Измените параметры при необходимости и нажмите «Сохранить».")
 
     def _save_scenario(self):
@@ -450,13 +647,52 @@ class ScenarioEditorDialog(tk.Toplevel):
             scenario = self._collect_scenario()
             saved = self.store.save(scenario, self._original_name)
         except (OSError, ValueError) as error:
-            self._status.set(str(error))
+            self._show_validation_error(error)
             messagebox.showerror("Сценарий не сохранён", str(error), parent=self)
             return
         self._original_name = saved["name"]
+        self._dirty = False
+        self._search.set("")
+        self._filter.set("Все")
         self._refresh_list(saved["name"])
         self._status.set("Сценарий сохранён.")
         self._on_change(saved["name"], "Пользовательский сценарий сохранён")
+
+    def _save_as_new(self):
+        try:
+            scenario = self._collect_scenario()
+            existing_names = {item["name"] for item in self.store.scenarios}
+            if scenario["name"] in existing_names:
+                scenario["name"] = self._unique_name(f"Копия — {scenario['name']}")
+            saved = self.store.save(scenario)
+        except (OSError, ValueError) as error:
+            self._show_validation_error(error)
+            messagebox.showerror("Сценарий не сохранён", str(error), parent=self)
+            return
+        self._dirty = False
+        self._search.set("")
+        self._filter.set("Все")
+        self._refresh_list(saved["name"])
+        self._status.set("Создан новый пользовательский сценарий.")
+        self._on_change(saved["name"], "Создан новый пользовательский сценарий")
+
+    def _revert_changes(self):
+        if not self._dirty:
+            self._status.set("Несохранённых изменений нет.")
+            return
+        if self._original_name is None:
+            self._dirty = False
+            self._new_scenario()
+            return
+        scenario = next(
+            (item for item in self.store.scenarios if item["name"] == self._original_name),
+            None,
+        )
+        if scenario is None:
+            self._status.set("Исходный сценарий больше не существует.")
+            return
+        self._load_scenario(scenario)
+        self._status.set("Несохранённые изменения отменены.")
 
     def _delete_scenario(self):
         if self._original_name is None:
@@ -476,7 +712,26 @@ class ScenarioEditorDialog(tk.Toplevel):
         self._refresh_list()
         self._on_change(self._variables["name"].get(), "Пользовательский сценарий удалён")
 
+    def _move_selected_scenario(self, direction):
+        if self._sort.get() != "Как задано":
+            self._status.set("Для изменения порядка выберите сортировку «Как задано».")
+            return
+        selection = self._listbox.curselection()
+        if not selection:
+            self._status.set("Выберите пользовательский сценарий.")
+            return
+        name = self._scenario_names[selection[0]]
+        try:
+            moved = self.store.move(name, direction)
+        except (OSError, ValueError) as error:
+            self._status.set(str(error))
+            return
+        self._refresh_list(name)
+        self._on_change(name, "Порядок пользовательских сценариев изменён" if moved else "Сценарий уже на границе списка")
+
     def _import_bundle(self):
+        if not self._confirm_discard():
+            return
         selected = filedialog.askopenfilename(
             parent=self,
             title="Импортировать комплект сценариев",
@@ -490,6 +745,9 @@ class ScenarioEditorDialog(tk.Toplevel):
             self._status.set(str(error))
             messagebox.showerror("Импорт не выполнен", str(error), parent=self)
             return
+        self._dirty = False
+        self._search.set("")
+        self._filter.set("Все")
         self._refresh_list()
         message = f"Импортировано сценариев: {count}. Совпадающие пользовательские записи обновлены."
         self._status.set(message)
@@ -514,13 +772,10 @@ class ScenarioEditorDialog(tk.Toplevel):
         self._status.set(f"Комплект сохранён: {destination.name}.")
 
     def _preview_scenario(self):
-        try:
-            scenario = self._collect_scenario()
-        except ValueError as error:
-            self._status.set(str(error))
-            messagebox.showerror("Предварительный расчёт невозможен", str(error), parent=self)
+        if not self._validate_scenario():
             return
-        self._close()
+        scenario = self._collect_scenario()
+        self._close(force=True)
         self._on_preview(scenario)
 
     def _selected_or_form_scenario(self):
@@ -569,9 +824,15 @@ class ScenarioEditorDialog(tk.Toplevel):
             index += 1
         return f"{base} {index}"
 
-    def _close(self):
+    def request_close(self):
+        return self._close()
+
+    def _close(self, force=False):
+        if not force and not self._confirm_discard():
+            return False
         self._on_close()
         self.destroy()
+        return True
 
     def _center(self, parent):
         self.update_idletasks()

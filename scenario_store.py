@@ -1,6 +1,8 @@
 import copy
 import json
 import math
+import os
+import shutil
 from pathlib import Path
 
 from calculations import CONTROLLER_TYPES
@@ -16,14 +18,22 @@ DISTURBANCE_TYPES = (
     "Плавно нарастающее",
 )
 CHAINS = ("lean_gas", "rich_absorbent")
-DEFAULT_USER_FILE = Path(__file__).with_name("scenarios.json")
+APP_DIRECTORY_NAME = "AbsorptionTrainer"
+USER_FILE_NAME = "scenarios.json"
+LEGACY_USER_FILE = Path(__file__).with_name(USER_FILE_NAME)
 
 
 class ScenarioStore:
-    def __init__(self, path=DEFAULT_USER_FILE):
-        self.path = Path(path)
+    def __init__(self, path=None, legacy_path=None):
+        self.path = Path(path) if path is not None else default_user_file()
+        self.backup_path = self.path.with_suffix(self.path.suffix + ".bak")
         self.user_scenarios = []
         self.warning = None
+        self.recovery_available = False
+        if path is None or legacy_path is not None:
+            self._migrate_legacy_file(
+                LEGACY_USER_FILE if legacy_path is None else Path(legacy_path)
+            )
         self.reload()
 
     @property
@@ -41,15 +51,35 @@ class ScenarioStore:
     def reload(self):
         self.user_scenarios = []
         self.warning = None
-        if not self.path.exists():
+        self.recovery_available = False
+        if not self.path.exists() and not self.backup_path.exists():
             return
         try:
             self.user_scenarios = _read_bundle(self.path)
             _ensure_unique_names(self.user_scenarios)
             _ensure_no_builtin_names(self.user_scenarios, self.builtin_names)
         except (OSError, ValueError, json.JSONDecodeError) as error:
-            self.user_scenarios = []
-            self.warning = f"Пользовательские сценарии не загружены: {error}"
+            try:
+                recovered = _read_bundle(self.backup_path)
+                _ensure_unique_names(recovered)
+                _ensure_no_builtin_names(recovered, self.builtin_names)
+            except (OSError, ValueError, json.JSONDecodeError):
+                self.user_scenarios = []
+                self.warning = f"Пользовательские сценарии не загружены: {error}"
+            else:
+                self.user_scenarios = recovered
+                self.recovery_available = True
+                self.warning = (
+                    "Основной файл сценариев повреждён. Загружена резервная копия; "
+                    "её можно восстановить в режиме преподавателя."
+                )
+
+    def restore_backup(self):
+        if not self.recovery_available:
+            raise ValueError("Корректная резервная копия не найдена.")
+        recovered = _read_bundle(self.backup_path)
+        self._write(recovered)
+        return len(recovered)
 
     def save(self, scenario, original_name=None):
         normalized = normalize_scenario(scenario)
@@ -89,6 +119,26 @@ class ScenarioStore:
             raise ValueError("Пользовательский сценарий не найден.")
         self._write(updated)
 
+    def move(self, name, direction):
+        """Move a user scenario one position in its saved order."""
+        if name in self.builtin_names:
+            raise ValueError("Встроенный сценарий нельзя перемещать.")
+        if direction not in (-1, 1):
+            raise ValueError("Направление перемещения должно быть -1 или 1.")
+        index = next(
+            (position for position, item in enumerate(self.user_scenarios) if item["name"] == name),
+            None,
+        )
+        if index is None:
+            raise ValueError("Пользовательский сценарий не найден.")
+        target_index = index + direction
+        if not 0 <= target_index < len(self.user_scenarios):
+            return False
+        updated = copy.deepcopy(self.user_scenarios)
+        updated[index], updated[target_index] = updated[target_index], updated[index]
+        self._write(updated)
+        return True
+
     def import_bundle(self, path):
         imported = _read_bundle(Path(path))
         _ensure_unique_names(imported)
@@ -106,9 +156,48 @@ class ScenarioStore:
     def _write(self, scenarios):
         _ensure_unique_names(scenarios)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        _write_bundle(self.path, scenarios)
+        temporary_path = self.path.with_suffix(self.path.suffix + ".tmp")
+        _write_bundle(temporary_path, scenarios)
+        if self.path.exists():
+            try:
+                _read_bundle(self.path)
+            except (OSError, ValueError, json.JSONDecodeError):
+                pass
+            else:
+                shutil.copy2(self.path, self.backup_path)
+        temporary_path.replace(self.path)
         self.user_scenarios = copy.deepcopy(scenarios)
         self.warning = None
+        self.recovery_available = False
+
+    def _migrate_legacy_file(self, legacy_path):
+        if self.path.exists() or not legacy_path.exists() or legacy_path == self.path:
+            return
+        try:
+            scenarios = _read_bundle(legacy_path)
+            _ensure_unique_names(scenarios)
+            _ensure_no_builtin_names(scenarios, self.builtin_names)
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            _write_bundle(self.path, scenarios)
+        except (OSError, ValueError, json.JSONDecodeError):
+            return
+
+
+def user_data_directory():
+    if os.name == "nt":
+        base = os.environ.get("APPDATA")
+        if base:
+            return Path(base) / APP_DIRECTORY_NAME
+    if os.name == "posix" and os.uname().sysname == "Darwin":
+        return Path.home() / "Library" / "Application Support" / APP_DIRECTORY_NAME
+    base = os.environ.get("XDG_CONFIG_HOME")
+    if base:
+        return Path(base) / APP_DIRECTORY_NAME
+    return Path.home() / ".config" / APP_DIRECTORY_NAME
+
+
+def default_user_file():
+    return user_data_directory() / USER_FILE_NAME
 
 
 def normalize_scenario(scenario):
