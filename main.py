@@ -28,6 +28,8 @@ ACCENT = "#2563EB"
 ACCENT_ACTIVE = "#1D4ED8"
 ERROR = "#B42318"
 SUCCESS = "#16A34A"
+SIDEBAR = "#10243E"
+SIDEBAR_MUTED = "#9AAAC0"
 
 LEAN_GAS = "lean_gas"
 RICH_ABSORBENT = "rich_absorbent"
@@ -58,20 +60,21 @@ DEFAULT_MODEL_VALUES = {
 
 class AbsorptionApp(ttk.Frame):
     def __init__(self, root):
-        super().__init__(root, style="App.TFrame", padding=(20, 16, 20, 12))
+        super().__init__(root, style="App.TFrame")
         self.root = root
         self.chain = LEAN_GAS
         self.model_values = DEFAULT_MODEL_VALUES.copy()
         self.model_dialog = None
+        self.pages = {}
+        self.nav_buttons = {}
 
         self.component_enabled = tk.BooleanVar(value=False)
         self.flow_enabled = tk.BooleanVar(value=False)
         self.component_value = tk.StringVar()
         self.flow_value = tk.StringVar()
         self.disturbance_type = tk.StringVar(value="Ступенчатое")
-        self.dynamics_expanded = tk.BooleanVar(value=False)
-        self.dynamics_heading = tk.StringVar()
         self.dynamics_summary = tk.StringVar()
+        self.page_title = tk.StringVar(value="Возмущения")
         self.start_time = tk.StringVar(value="10")
         self.simulation_duration = tk.StringVar(value="100")
         self.effect_duration = tk.StringVar(value="10")
@@ -97,8 +100,8 @@ class AbsorptionApp(ttk.Frame):
 
     def _configure_window(self):
         self.root.title("Анализ процесса абсорбции")
-        self.root.geometry("1500x920")
-        self.root.minsize(1150, 780)
+        self.root.geometry("1600x950")
+        self.root.minsize(1200, 780)
         self.root.configure(background=BACKGROUND)
         self.pack(fill="both", expand=True)
 
@@ -117,6 +120,21 @@ class AbsorptionApp(ttk.Frame):
         style.configure("ResultValue.TLabel", background=CARD_BACKGROUND, foreground=TEXT, font=("Segoe UI", 10, "bold"))
         style.configure("Status.TLabel", background=BACKGROUND, foreground=TEXT, font=("Segoe UI", 9))
         style.configure("StatusDot.TLabel", background=BACKGROUND, foreground=SUCCESS, font=("Segoe UI", 14))
+        style.configure("Topbar.TFrame", background="#FFFFFF")
+        style.configure("TopbarTitle.TLabel", background="#FFFFFF", foreground=TEXT, font=("Segoe UI", 16, "bold"))
+        style.configure("TopbarMeta.TLabel", background="#FFFFFF", foreground=MUTED, font=("Segoe UI", 9))
+        style.configure("Sidebar.TFrame", background=SIDEBAR)
+        style.configure("SidebarTitle.TLabel", background=SIDEBAR, foreground="#FFFFFF", font=("Segoe UI", 14, "bold"))
+        style.configure("SidebarMeta.TLabel", background=SIDEBAR, foreground=SIDEBAR_MUTED, font=("Segoe UI", 9))
+        style.configure("SidebarNav.TButton", background=SIDEBAR, foreground="#E5ECF5", borderwidth=0, padding=(18, 13), font=("Segoe UI", 10), anchor="w")
+        style.map("SidebarNav.TButton", background=[("active", "#193553")])
+        style.configure("SelectedSidebarNav.TButton", background=ACCENT, foreground="#FFFFFF", borderwidth=0, padding=(18, 13), font=("Segoe UI", 10, "bold"), anchor="w")
+        style.map("SelectedSidebarNav.TButton", background=[("active", ACCENT_ACTIVE)])
+        style.configure("FutureSidebarNav.TButton", background=SIDEBAR, foreground="#687B94", borderwidth=0, padding=(18, 13), font=("Segoe UI", 10), anchor="w")
+        style.map("FutureSidebarNav.TButton", background=[("disabled", SIDEBAR)], foreground=[("disabled", "#687B94")])
+        style.configure("SectionHeader.TLabel", background=BACKGROUND, foreground=TEXT, font=("Segoe UI", 15, "bold"))
+        style.configure("MetricTitle.TLabel", background=CARD_BACKGROUND, foreground=MUTED, font=("Segoe UI", 9))
+        style.configure("MetricValue.TLabel", background=CARD_BACKGROUND, foreground=TEXT, font=("Segoe UI", 18, "bold"))
 
         style.configure("TEntry", padding=7, fieldbackground="#FFFFFF", bordercolor=BORDER, lightcolor=BORDER, darkcolor=BORDER)
         style.configure("Error.TEntry", padding=7, fieldbackground="#FFF6F5", bordercolor=ERROR, lightcolor=ERROR, darkcolor=ERROR)
@@ -132,84 +150,125 @@ class AbsorptionApp(ttk.Frame):
         style.map("SelectedSegment.TButton", background=[("active", ACCENT_ACTIVE)])
         style.configure("Toolbar.TButton", background="#FFFFFF", foreground=TEXT, bordercolor=BORDER, padding=(6, 4), font=("Segoe UI", 8))
         style.map("Toolbar.TButton", background=[("active", "#EEF2F6")])
-        style.configure(
-            "Disclosure.TButton",
-            background=CARD_BACKGROUND,
-            foreground=TEXT,
-            borderwidth=0,
-            padding=(0, 3),
-            font=("Segoe UI", 11, "bold"),
-            anchor="w",
-        )
-        style.map("Disclosure.TButton", background=[("active", "#EEF2F6")])
 
     def _build_layout(self):
-        self.columnconfigure(0, minsize=470)
-        self.columnconfigure(1, weight=1)
+        self.columnconfigure(0, weight=1)
         self.rowconfigure(1, weight=1)
 
-        ttk.Label(self, text="Анализ процесса абсорбции", style="Header.TLabel").grid(
-            row=0, column=0, columnspan=2, sticky="w", pady=(0, 14)
+        topbar = ttk.Frame(self, style="Topbar.TFrame", padding=(22, 12))
+        topbar.grid(row=0, column=0, sticky="ew")
+        topbar.columnconfigure(0, weight=1)
+        ttk.Label(topbar, text="Анализ процесса абсорбции", style="TopbarTitle.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(topbar, text="Учебный стенд АТПП", style="TopbarMeta.TLabel").grid(row=0, column=1, sticky="e")
+
+        body = ttk.Frame(self, style="App.TFrame")
+        body.grid(row=1, column=0, sticky="nsew")
+        body.columnconfigure(0, minsize=220)
+        body.columnconfigure(1, minsize=390)
+        body.columnconfigure(2, weight=1)
+        body.rowconfigure(0, weight=1)
+
+        sidebar = ttk.Frame(body, style="Sidebar.TFrame", padding=(12, 20))
+        sidebar.grid(row=0, column=0, sticky="nsew")
+        sidebar.columnconfigure(0, weight=1)
+        ttk.Label(sidebar, text="АБСОРБЦИЯ", style="SidebarTitle.TLabel").grid(row=0, column=0, sticky="w", padx=8, pady=(0, 4))
+        ttk.Label(sidebar, text="Моделирование контуров", style="SidebarMeta.TLabel").grid(row=1, column=0, sticky="w", padx=8, pady=(0, 24))
+
+        active_navigation = (
+            ("disturbances", "Возмущения"),
+            ("dynamics", "Динамика"),
+            ("results", "Результаты"),
         )
+        for row, (key, label) in enumerate(active_navigation, start=2):
+            button = ttk.Button(sidebar, text=label, command=lambda page=key: self._show_page(page), style="SidebarNav.TButton")
+            button.grid(row=row, column=0, sticky="ew", pady=2)
+            self.nav_buttons[key] = button
 
-        controls_host = ttk.Frame(self, style="App.TFrame")
-        controls_host.grid(row=1, column=0, sticky="nsew", padx=(0, 16))
-        controls_host.columnconfigure(0, weight=1)
-        controls_host.rowconfigure(0, weight=1)
+        ttk.Separator(sidebar).grid(row=5, column=0, sticky="ew", padx=8, pady=16)
+        for row, label in enumerate(("Регулятор · скоро", "Сценарии · скоро", "Экспорт · скоро"), start=6):
+            ttk.Button(sidebar, text=label, state="disabled", style="FutureSidebarNav.TButton").grid(row=row, column=0, sticky="ew", pady=2)
 
-        controls_canvas = tk.Canvas(
-            controls_host,
-            background=BACKGROUND,
-            borderwidth=0,
-            highlightthickness=0,
-        )
-        controls_canvas.grid(row=0, column=0, sticky="nsew")
-        controls_scrollbar = ttk.Scrollbar(controls_host, orient="vertical", command=controls_canvas.yview)
-        controls_scrollbar.grid(row=0, column=1, sticky="ns")
-        controls_canvas.configure(yscrollcommand=controls_scrollbar.set)
+        inspector = ttk.Frame(body, style="App.TFrame", padding=(16, 16, 12, 12))
+        inspector.grid(row=0, column=1, sticky="nsew")
+        inspector.columnconfigure(0, weight=1)
+        inspector.rowconfigure(1, weight=1)
+        ttk.Label(inspector, textvariable=self.page_title, style="SectionHeader.TLabel").grid(row=0, column=0, sticky="w", pady=(0, 12))
 
-        controls = ttk.Frame(controls_canvas, style="App.TFrame")
-        controls.columnconfigure(0, weight=1)
-        controls_window = controls_canvas.create_window((0, 0), window=controls, anchor="nw")
-        controls.bind(
-            "<Configure>",
-            lambda _event: controls_canvas.configure(scrollregion=controls_canvas.bbox("all")),
-        )
-        controls_canvas.bind(
-            "<Configure>",
-            lambda event: controls_canvas.itemconfigure(controls_window, width=event.width),
-        )
+        page_host = ttk.Frame(inspector, style="App.TFrame")
+        page_host.grid(row=1, column=0, sticky="nsew")
+        page_host.columnconfigure(0, weight=1)
+        page_host.rowconfigure(0, weight=1)
+        for key in ("disturbances", "dynamics", "results"):
+            page = ttk.Frame(page_host, style="App.TFrame")
+            page.grid(row=0, column=0, sticky="nsew")
+            page.columnconfigure(0, weight=1)
+            self.pages[key] = page
 
-        results = ttk.Frame(self, style="App.TFrame")
-        results.grid(row=1, column=1, sticky="nsew")
-        results.columnconfigure(0, weight=1)
-        results.rowconfigure(0, weight=1)
-        results.rowconfigure(1, weight=1)
+        self._build_chain_card(self.pages["disturbances"])
+        self._build_disturbance_card(self.pages["disturbances"])
+        self._build_dynamics_card(self.pages["dynamics"])
+        self._build_result_card(self.pages["results"])
 
-        self._build_chain_card(controls)
-        self._build_disturbance_card(controls)
-        self._build_result_card(controls)
+        actions = ttk.Frame(inspector, style="App.TFrame")
+        actions.grid(row=2, column=0, sticky="ew", pady=(12, 0))
+        actions.columnconfigure((0, 1), weight=1)
+        self.calculate_button = ttk.Button(actions, text="Рассчитать", command=self._calculate, style="Primary.TButton", state="disabled")
+        self.calculate_button.grid(row=0, column=0, sticky="ew", padx=(0, 5))
+        ttk.Button(actions, text="Сбросить", command=self._reset, style="Secondary.TButton").grid(row=0, column=1, sticky="ew", padx=(5, 0))
+
+        workspace = ttk.Frame(body, style="App.TFrame", padding=(4, 16, 16, 12))
+        workspace.grid(row=0, column=2, sticky="nsew")
+        workspace.columnconfigure(0, weight=1)
+        workspace.rowconfigure(1, weight=1)
+        workspace.rowconfigure(2, weight=1)
+        self._build_metric_strip(workspace)
 
         self.disturbance_axis, self.disturbance_canvas, self.disturbance_toolbar = self._build_chart_card(
-            results,
-            row=0,
+            workspace,
+            row=1,
             title="Возмущающее воздействие",
             subtitle="Изменение относительно базового уровня",
         )
         self.response_axis, self.response_canvas, self.response_toolbar = self._build_chart_card(
-            results,
-            row=1,
+            workspace,
+            row=2,
             title="Кривая разгона",
             subtitle_variable=self.response_subtitle,
         )
 
-        status = ttk.Frame(self, style="App.TFrame")
-        status.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        status = ttk.Frame(self, style="App.TFrame", padding=(18, 6, 18, 8))
+        status.grid(row=2, column=0, sticky="ew")
         status.columnconfigure(1, weight=1)
         self.status_dot = ttk.Label(status, text="●", style="StatusDot.TLabel")
         self.status_dot.grid(row=0, column=0, sticky="w")
         ttk.Label(status, textvariable=self.status_text, style="Status.TLabel").grid(row=0, column=1, sticky="w", padx=(5, 0))
         ttk.Label(status, text="Python 3.14", style="Status.TLabel").grid(row=0, column=2, sticky="e")
+        self._show_page("disturbances")
+
+    def _build_metric_strip(self, parent):
+        metrics = ttk.Frame(parent, style="App.TFrame")
+        metrics.grid(row=0, column=0, sticky="ew", pady=(0, 12))
+        metrics.columnconfigure((0, 1, 2), weight=1)
+        for column, (label, variable) in enumerate((
+            ("Базовое значение", self.baseline_result),
+            ("Суммарная доля", self.disturbance_result),
+            ("Расчётное значение", self.calculated_result),
+        )):
+            card = ttk.Frame(metrics, style="Card.TFrame", padding=(16, 12))
+            card.grid(row=0, column=column, sticky="ew", padx=(0, 6) if column < 2 else 0)
+            ttk.Label(card, text=label, style="MetricTitle.TLabel").grid(row=0, column=0, sticky="w")
+            ttk.Label(card, textvariable=variable, style="MetricValue.TLabel").grid(row=1, column=0, sticky="w", pady=(4, 0))
+
+    def _show_page(self, page):
+        titles = {
+            "disturbances": "Возмущения",
+            "dynamics": "Динамика объекта",
+            "results": "Результаты расчёта",
+        }
+        self.pages[page].tkraise()
+        self.page_title.set(titles[page])
+        for key, button in self.nav_buttons.items():
+            button.configure(style="SelectedSidebarNav.TButton" if key == page else "SidebarNav.TButton")
 
     def _card(self, parent, row, padding=(18, 16)):
         card = ttk.Frame(parent, style="Card.TFrame", padding=padding)
@@ -272,8 +331,8 @@ class AbsorptionApp(ttk.Frame):
             ("xog_initial", "Начальная концентрация обеднённого газа", "Xог₀"),
         )
         absorbent_specs = (
-            ("gna", "Исходный расход абсорбента", "Gна"),
-            ("xa", "Исходный состав абсорбента", "Xа"),
+            ("gna", "Расход насыщенного абсорбента", "Gна"),
+            ("xa", "Состав исходного абсорбента", "Xа"),
             ("xna_initial", "Начальная концентрация насыщенного абсорбента", "Xна₀"),
         )
 
@@ -306,9 +365,9 @@ class AbsorptionApp(ttk.Frame):
         )
         gog_value = tk.StringVar(value="—")
         ga_value = tk.StringVar(value="—")
-        ttk.Label(derived, text="Gог", style="Body.TLabel").grid(row=1, column=0, sticky="w")
+        ttk.Label(derived, text="Gог — расход обеднённого газа", style="Body.TLabel").grid(row=1, column=0, sticky="w")
         ttk.Label(derived, textvariable=gog_value, style="ResultValue.TLabel").grid(row=1, column=1, sticky="w", padx=(8, 28))
-        ttk.Label(derived, text="Gа", style="Body.TLabel").grid(row=1, column=2, sticky="w")
+        ttk.Label(derived, text="Gа — расход абсорбента", style="Body.TLabel").grid(row=1, column=2, sticky="w")
         ttk.Label(derived, textvariable=ga_value, style="ResultValue.TLabel").grid(row=1, column=3, sticky="w", padx=(8, 0))
 
         actions = ttk.Frame(content, style="App.TFrame")
@@ -423,67 +482,57 @@ class AbsorptionApp(ttk.Frame):
         ttk.Separator(card).grid(row=6, column=0, columnspan=3, sticky="ew", pady=(0, 12))
         ttk.Button(
             card,
-            textvariable=self.dynamics_heading,
-            command=self._toggle_dynamics,
-            style="Disclosure.TButton",
-        ).grid(
-            row=7, column=0, columnspan=3, sticky="ew"
+            text="Параметры динамики  →",
+            command=lambda: self._show_page("dynamics"),
+            style="Secondary.TButton",
+        ).grid(row=7, column=0, columnspan=3, sticky="ew")
+        ttk.Label(card, textvariable=self.dynamics_summary, style="Muted.TLabel", wraplength=320).grid(
+            row=8, column=0, columnspan=3, sticky="w", pady=(6, 0)
         )
-        self.dynamics_summary_label = ttk.Label(
-            card,
-            textvariable=self.dynamics_summary,
-            style="Muted.TLabel",
-            wraplength=400,
+        card.columnconfigure(0, weight=1)
+
+    def _build_dynamics_card(self, parent):
+        card = self._card(parent, 0)
+        ttk.Label(card, text="Параметры времени и формы", style="CardTitle.TLabel").grid(
+            row=0, column=0, columnspan=2, sticky="w", pady=(0, 14)
         )
-        self.dynamics_summary_label.grid(row=8, column=0, columnspan=3, sticky="w", pady=(2, 4))
 
-        self.dynamics_parameters = ttk.Frame(card, style="CardBody.TFrame")
-        self.dynamics_parameters.grid(row=9, column=0, columnspan=3, sticky="ew", pady=(8, 0))
-        self.dynamics_parameters.columnconfigure((0, 1), weight=1)
-
-        ttk.Label(self.dynamics_parameters, text="Вид воздействия", style="Body.TLabel").grid(row=0, column=0, sticky="w")
-        ttk.Label(self.dynamics_parameters, text="Начало, с", style="Body.TLabel").grid(row=0, column=1, sticky="w", padx=(10, 0))
+        ttk.Label(card, text="Вид воздействия", style="Body.TLabel").grid(row=1, column=0, sticky="w")
+        ttk.Label(card, text="Начало, с", style="Body.TLabel").grid(row=1, column=1, sticky="w", padx=(10, 0))
         self.disturbance_type_box = ttk.Combobox(
-            self.dynamics_parameters,
+            card,
             textvariable=self.disturbance_type,
             values=tuple(DISTURBANCE_TYPES),
             state="readonly",
             width=23,
         )
-        self.disturbance_type_box.grid(row=1, column=0, sticky="ew", pady=(3, 9))
+        self.disturbance_type_box.grid(row=2, column=0, sticky="ew", pady=(3, 12))
         self.disturbance_type_box.bind("<<ComboboxSelected>>", self._update_disturbance_type)
-        self.start_time_entry = ttk.Entry(self.dynamics_parameters, textvariable=self.start_time)
-        self.start_time_entry.grid(row=1, column=1, sticky="ew", padx=(10, 0), pady=(3, 9))
+        self.start_time_entry = ttk.Entry(card, textvariable=self.start_time)
+        self.start_time_entry.grid(row=2, column=1, sticky="ew", padx=(10, 0), pady=(3, 12))
 
-        ttk.Label(self.dynamics_parameters, text="Длительность моделирования, с", style="Body.TLabel", wraplength=190).grid(row=2, column=0, sticky="w")
-        ttk.Label(self.dynamics_parameters, text="Длительность воздействия, с", style="Body.TLabel", wraplength=190).grid(row=2, column=1, sticky="w", padx=(10, 0))
-        self.simulation_duration_entry = ttk.Entry(self.dynamics_parameters, textvariable=self.simulation_duration)
-        self.simulation_duration_entry.grid(row=3, column=0, sticky="ew", pady=(3, 9))
-        self.effect_duration_entry = ttk.Entry(self.dynamics_parameters, textvariable=self.effect_duration)
-        self.effect_duration_entry.grid(row=3, column=1, sticky="ew", padx=(10, 0), pady=(3, 9))
+        ttk.Label(card, text="Длительность моделирования, с", style="Body.TLabel", wraplength=170).grid(row=3, column=0, sticky="w")
+        ttk.Label(card, text="Длительность воздействия, с", style="Body.TLabel", wraplength=170).grid(row=3, column=1, sticky="w", padx=(10, 0))
+        self.simulation_duration_entry = ttk.Entry(card, textvariable=self.simulation_duration)
+        self.simulation_duration_entry.grid(row=4, column=0, sticky="ew", pady=(3, 12))
+        self.effect_duration_entry = ttk.Entry(card, textvariable=self.effect_duration)
+        self.effect_duration_entry.grid(row=4, column=1, sticky="ew", padx=(10, 0), pady=(3, 12))
 
-        ttk.Label(self.dynamics_parameters, text="Постоянная времени T, с", style="Body.TLabel").grid(row=4, column=0, sticky="w")
-        ttk.Label(self.dynamics_parameters, text="Запаздывание L, с", style="Body.TLabel").grid(row=4, column=1, sticky="w", padx=(10, 0))
-        self.time_constant_entry = ttk.Entry(self.dynamics_parameters, textvariable=self.time_constant)
-        self.time_constant_entry.grid(row=5, column=0, sticky="ew", pady=(3, 0))
-        self.delay_entry = ttk.Entry(self.dynamics_parameters, textvariable=self.delay)
-        self.delay_entry.grid(row=5, column=1, sticky="ew", padx=(10, 0), pady=(3, 0))
+        ttk.Label(card, text="Постоянная времени T, с", style="Body.TLabel").grid(row=5, column=0, sticky="w")
+        ttk.Label(card, text="Запаздывание L, с", style="Body.TLabel").grid(row=5, column=1, sticky="w", padx=(10, 0))
+        self.time_constant_entry = ttk.Entry(card, textvariable=self.time_constant)
+        self.time_constant_entry.grid(row=6, column=0, sticky="ew", pady=(3, 0))
+        self.delay_entry = ttk.Entry(card, textvariable=self.delay)
+        self.delay_entry.grid(row=6, column=1, sticky="ew", padx=(10, 0), pady=(3, 0))
 
         self.dynamics_error_label = ttk.Label(
             card,
             textvariable=self.dynamics_error,
             style="Error.TLabel",
-            wraplength=400,
+            wraplength=330,
         )
-        self.dynamics_error_label.grid(row=10, column=0, columnspan=3, sticky="w", pady=(4, 8))
-
-        actions = ttk.Frame(card, style="CardBody.TFrame")
-        actions.grid(row=11, column=0, columnspan=3, sticky="ew", pady=(8, 0))
-        actions.columnconfigure((0, 1), weight=1)
-        self.calculate_button = ttk.Button(actions, text="Рассчитать", command=self._calculate, style="Primary.TButton", state="disabled")
-        self.calculate_button.grid(row=0, column=0, sticky="ew", padx=(0, 6))
-        ttk.Button(actions, text="Сбросить", command=self._reset, style="Secondary.TButton").grid(row=0, column=1, sticky="ew", padx=(6, 0))
-        card.columnconfigure(0, weight=1)
+        self.dynamics_error_label.grid(row=7, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        card.columnconfigure((0, 1), weight=1)
         for variable in (
             self.disturbance_type,
             self.start_time,
@@ -493,10 +542,9 @@ class AbsorptionApp(ttk.Frame):
         ):
             variable.trace_add("write", self._update_dynamics_summary)
         self._update_disturbance_type()
-        self._set_dynamics_expanded(False)
 
     def _build_result_card(self, parent):
-        card = self._card(parent, 2)
+        card = self._card(parent, 0)
         ttk.Label(card, text="Результат", style="CardTitle.TLabel").grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 12))
         rows = (
             ("Базовое значение", self.baseline_result),
@@ -576,24 +624,6 @@ class AbsorptionApp(ttk.Frame):
         self.calculate_button.configure(state="normal" if enabled else "disabled")
         self._clear_errors()
 
-    def _toggle_dynamics(self):
-        self._set_dynamics_expanded(not self.dynamics_expanded.get())
-
-    def _set_dynamics_expanded(self, expanded):
-        self.dynamics_expanded.set(expanded)
-        self.dynamics_heading.set(
-            f"{'▼' if expanded else '▶'} Параметры времени и формы"
-        )
-        if expanded:
-            self.dynamics_summary_label.grid_remove()
-            self.dynamics_parameters.grid()
-            self.dynamics_error_label.grid()
-        else:
-            self.dynamics_parameters.grid_remove()
-            self.dynamics_error_label.grid_remove()
-            self.dynamics_summary_label.grid()
-        self._update_dynamics_summary()
-
     def _update_dynamics_summary(self, *_):
         self.dynamics_summary.set(
             f"{self.disturbance_type.get()} · "
@@ -638,6 +668,7 @@ class AbsorptionApp(ttk.Frame):
         except ValueError as error:
             error_variable.set(str(error))
             entry.configure(style="Error.TEntry")
+            self._show_page("disturbances")
             raise
 
     def _read_dynamic_parameters(self):
@@ -654,7 +685,7 @@ class AbsorptionApp(ttk.Frame):
             except ValueError as error:
                 entry.configure(style="Error.TEntry")
                 self.dynamics_error.set(f"{label}: {error}")
-                self._set_dynamics_expanded(True)
+                self._show_page("dynamics")
                 raise
 
         kind = DISTURBANCE_TYPES[self.disturbance_type.get()]
@@ -666,7 +697,7 @@ class AbsorptionApp(ttk.Frame):
             except ValueError as error:
                 self.effect_duration_entry.configure(style="Error.TEntry")
                 self.dynamics_error.set(f"Длительность воздействия: {error}")
-                self._set_dynamics_expanded(True)
+                self._show_page("dynamics")
                 raise
 
         start_time = parsed["Начало воздействия"]
@@ -675,7 +706,7 @@ class AbsorptionApp(ttk.Frame):
             self.start_time_entry.configure(style="Error.TEntry")
             self.simulation_duration_entry.configure(style="Error.TEntry")
             self.dynamics_error.set("Начало воздействия должно быть раньше окончания моделирования.")
-            self._set_dynamics_expanded(True)
+            self._show_page("dynamics")
             raise ValueError(self.dynamics_error.get())
 
         return {
