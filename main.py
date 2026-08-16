@@ -3,6 +3,7 @@ from tkinter import filedialog, messagebox, ttk
 
 import numpy as np
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
+from matplotlib.colors import ListedColormap
 from matplotlib.figure import Figure
 
 from app_info import APP_NAME, APP_VERSION
@@ -24,6 +25,12 @@ from exporting import (
     write_html_report,
     write_pdf_report,
     write_protocol,
+)
+from exploration import (
+    MAP_CATEGORIES,
+    SENSITIVITY_PARAMETERS,
+    controller_setting_map,
+    sensitivity_runs,
 )
 from laboratory import (
     CORRECTION_OPTIONS,
@@ -195,6 +202,25 @@ class AbsorptionApp(ttk.Frame):
         self.comparison_summary = tk.StringVar(
             value="Закрепите результаты нескольких расчётов для сравнения."
         )
+        self.sensitivity_parameter = tk.StringVar(value="Постоянная времени T")
+        self.sensitivity_values = tk.StringVar(value="5, 10, 15, 20")
+        self.sensitivity_summary = tk.StringVar(
+            value="Выберите параметр, введите от 2 до 6 значений и постройте семейство кривых."
+        )
+        self.sensitivity_data = None
+        self.map_controller_type = tk.StringVar(value="PI")
+        self.map_gain_min = tk.StringVar(value="0.2")
+        self.map_gain_max = tk.StringVar(value="4")
+        self.map_integral_min = tk.StringVar(value="2")
+        self.map_integral_max = tk.StringVar(value="30")
+        self.map_derivative_time = tk.StringVar(value="1")
+        self.map_grid_size = tk.StringVar(value="9")
+        self.map_summary = tk.StringVar(value="Постройте карту настроек P-, PI- или PID-регулятора.")
+        self.map_selection_summary = tk.StringVar(value="Выберите ячейку карты, чтобы увидеть переходный процесс.")
+        self.map_data = None
+        self.map_selection = None
+        self.map_click_callback = None
+        self.map_colorbar = None
         self.current_page = self.settings["last_page"]
         self._charts_show_comparison = False
         self.text_tooltips = []
@@ -225,6 +251,7 @@ class AbsorptionApp(ttk.Frame):
         style.configure("CardBody.TFrame", background=CARD_BACKGROUND)
         style.configure("Header.TLabel", background=BACKGROUND, foreground=TEXT, font=("Segoe UI", 17, "bold"))
         style.configure("CardTitle.TLabel", background=CARD_BACKGROUND, foreground=TEXT, font=("Segoe UI", 12, "bold"))
+        style.configure("DialogLabel.TLabel", background=BACKGROUND, foreground=TEXT, font=("Segoe UI", 10, "bold"))
         style.configure("Body.TLabel", background=CARD_BACKGROUND, foreground=TEXT, font=("Segoe UI", 10))
         style.configure("Muted.TLabel", background=CARD_BACKGROUND, foreground=MUTED, font=("Segoe UI", 9))
         style.configure("Error.TLabel", background=CARD_BACKGROUND, foreground=ERROR, font=("Segoe UI", 8))
@@ -308,6 +335,8 @@ class AbsorptionApp(ttk.Frame):
             ("results", "Результаты"),
             ("comparison", "Сравнение"),
             ("controller", "Регулятор"),
+            ("sensitivity", "Чувствительность"),
+            ("tuning_map", "Карта настроек"),
             ("scenarios", "Сценарии"),
             ("export", "Экспорт"),
         )
@@ -360,6 +389,8 @@ class AbsorptionApp(ttk.Frame):
             "results",
             "comparison",
             "controller",
+            "sensitivity",
+            "tuning_map",
             "scenarios",
             "export",
         ):
@@ -375,6 +406,8 @@ class AbsorptionApp(ttk.Frame):
         self._build_result_card(self.page_contents["results"])
         self._build_comparison_card(self.page_contents["comparison"])
         self._build_controller_card(self.page_contents["controller"])
+        self._build_sensitivity_card(self.page_contents["sensitivity"])
+        self._build_tuning_map_card(self.page_contents["tuning_map"])
         self._build_scenarios_card(self.page_contents["scenarios"])
         self._build_export_card(self.page_contents["export"])
         for page in self.pages.values():
@@ -445,6 +478,8 @@ class AbsorptionApp(ttk.Frame):
             "results": "Результаты расчёта",
             "comparison": "Сравнение опытов",
             "controller": "Регулятор",
+            "sensitivity": "Анализ чувствительности",
+            "tuning_map": "Карта настроек регулятора",
             "scenarios": "Лабораторные сценарии",
             "export": "Экспорт результатов",
         }
@@ -457,7 +492,13 @@ class AbsorptionApp(ttk.Frame):
             button.configure(style="SelectedSidebarNav.TButton" if key == page else "SidebarNav.TButton")
         if page == "comparison":
             self._draw_comparison()
-        elif previous_page == "comparison" and self._charts_show_comparison:
+        elif page == "sensitivity":
+            self._draw_sensitivity()
+        elif page == "tuning_map":
+            self._draw_tuning_map()
+        elif previous_page in ("comparison", "sensitivity", "tuning_map") and self._charts_show_comparison:
+            self._remove_map_colorbar()
+            self._clear_map_click_callback()
             self._draw_last_calculation()
 
     def _toggle_sidebar(self):
@@ -764,6 +805,221 @@ class AbsorptionApp(ttk.Frame):
             wraplength=330,
         ).grid(row=2, column=0, sticky="w", pady=(6, 0))
         self._update_controller_type()
+
+    def _build_sensitivity_card(self, parent):
+        card = self._card(parent, 0)
+        ttk.Label(card, text="Семейство переходных процессов", style="CardTitle.TLabel").grid(
+            row=0, column=0, sticky="w", pady=(0, 8)
+        )
+        ttk.Label(
+            card,
+            text=(
+                "Меняйте один параметр при неизменных остальных условиях. "
+                "Каждая кривая показывает отклик для отдельного значения."
+            ),
+            style="Body.TLabel", wraplength=330, justify="left",
+        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(0, 12))
+        ttk.Label(card, text="Параметр", style="Body.TLabel").grid(row=2, column=0, sticky="w")
+        ttk.Label(card, text="Значения через запятую", style="Body.TLabel").grid(
+            row=2, column=1, sticky="w", padx=(8, 0)
+        )
+        self.sensitivity_parameter_box = ttk.Combobox(
+            card, textvariable=self.sensitivity_parameter, values=SENSITIVITY_PARAMETERS,
+            state="readonly", width=20,
+        )
+        self.sensitivity_parameter_box.grid(row=3, column=0, sticky="ew", pady=(4, 12))
+        self.sensitivity_values_entry = ttk.Entry(card, textvariable=self.sensitivity_values, width=20)
+        self.sensitivity_values_entry.grid(row=3, column=1, sticky="ew", padx=(8, 0), pady=(4, 12))
+        ttk.Button(
+            card, text="Построить семейство", command=self._calculate_sensitivity, style="Primary.TButton"
+        ).grid(row=4, column=0, columnspan=2, sticky="ew")
+        ttk.Label(
+            card, textvariable=self.sensitivity_summary, style="Muted.TLabel", wraplength=330, justify="left"
+        ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(10, 0))
+        card.columnconfigure((0, 1), weight=1)
+
+        note = self._card(parent, 1, padding=(14, 12))
+        ttk.Label(note, text="Как читать график", style="CardTitle.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(
+            note,
+            text=(
+                "Большая T замедляет реакцию, большая L сдвигает её вправо. "
+                "Изменение доли возмущения показывает влияние силы нарушения режима."
+            ),
+            style="Body.TLabel", wraplength=330, justify="left",
+        ).grid(row=1, column=0, sticky="w", pady=(6, 0))
+
+    def _build_tuning_map_card(self, parent):
+        card = self._card(parent, 0)
+        ttk.Label(card, text="Упрощённая карта настроек", style="CardTitle.TLabel").grid(
+            row=0, column=0, columnspan=2, sticky="w", pady=(0, 8)
+        )
+        ttk.Label(
+            card,
+            text=(
+                "P отображается как ряд по Kp. Для PI и PID строится плоскость Kp × Ti; "
+                "в PID выбранное Td остаётся фиксированным. "
+                "Щёлкните по ячейке, затем примените выбранные настройки."
+            ),
+            style="Body.TLabel", wraplength=330, justify="left",
+        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(0, 12))
+        ttk.Label(card, text="Тип", style="Body.TLabel").grid(row=2, column=0, sticky="w")
+        ttk.Label(card, text="Размер сетки", style="Body.TLabel").grid(row=2, column=1, sticky="w", padx=(8, 0))
+        self.map_type_box = ttk.Combobox(card, textvariable=self.map_controller_type, values=("P", "PI", "PID"), state="readonly")
+        self.map_type_box.grid(row=3, column=0, sticky="ew", pady=(4, 10))
+        self.map_grid_size_entry = ttk.Entry(card, textvariable=self.map_grid_size, width=12)
+        self.map_grid_size_entry.grid(row=3, column=1, sticky="ew", padx=(8, 0), pady=(4, 10))
+        self._map_range_entries(card, 4, "Kp", self.map_gain_min, self.map_gain_max)
+        self.map_integral_widgets = self._map_range_entries(
+            card, 6, "Ti, с", self.map_integral_min, self.map_integral_max
+        )
+        ttk.Label(card, text="Td, с (для PID)", style="Body.TLabel").grid(row=8, column=0, sticky="w")
+        self.map_derivative_entry = ttk.Entry(card, textvariable=self.map_derivative_time, width=12)
+        self.map_derivative_entry.grid(row=8, column=1, sticky="ew", padx=(8, 0))
+        ttk.Button(card, text="Построить карту", command=self._calculate_tuning_map, style="Primary.TButton").grid(
+            row=9, column=0, columnspan=2, sticky="ew", pady=(10, 0)
+        )
+        ttk.Label(card, textvariable=self.map_summary, style="Muted.TLabel", wraplength=330, justify="left").grid(
+            row=10, column=0, columnspan=2, sticky="w", pady=(10, 0)
+        )
+        card.columnconfigure((0, 1), weight=1)
+
+        selection = self._card(parent, 1, padding=(14, 12))
+        ttk.Label(selection, text="Выбранная точка", style="CardTitle.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(
+            selection, textvariable=self.map_selection_summary, style="Body.TLabel", wraplength=330, justify="left"
+        ).grid(row=1, column=0, sticky="w", pady=(6, 10))
+        self.apply_map_selection_button = ttk.Button(
+            selection, text="Применить и открыть переходный процесс",
+            command=self._apply_map_selection, style="Secondary.TButton", state="disabled",
+        )
+        self.apply_map_selection_button.grid(row=2, column=0, sticky="ew")
+        self.map_type_box.bind("<<ComboboxSelected>>", self._update_map_input_state)
+        self._update_map_input_state()
+
+    @staticmethod
+    def _map_range_entries(parent, row, label, minimum, maximum):
+        ttk.Label(parent, text=f"{label}: от", style="Body.TLabel").grid(row=row, column=0, sticky="w")
+        ttk.Label(parent, text="до", style="Body.TLabel").grid(row=row, column=1, sticky="w", padx=(8, 0))
+        minimum_entry = ttk.Entry(parent, textvariable=minimum, width=12)
+        minimum_entry.grid(row=row + 1, column=0, sticky="ew", pady=(4, 10))
+        maximum_entry = ttk.Entry(parent, textvariable=maximum, width=12)
+        maximum_entry.grid(row=row + 1, column=1, sticky="ew", padx=(8, 0), pady=(4, 10))
+        return minimum_entry, maximum_entry
+
+    def _update_map_input_state(self, _event=None):
+        controller_type = self.map_controller_type.get()
+        state = "normal" if controller_type in ("PI", "PID") else "disabled"
+        for widget in self.map_integral_widgets:
+            widget.configure(state=state)
+        self.map_derivative_entry.configure(state="normal" if controller_type == "PID" else "disabled")
+
+    def _read_analysis_inputs(self):
+        if not (self.component_enabled.get() or self.flow_enabled.get()):
+            raise ValueError("Включите хотя бы одно возмущение.")
+        component_fraction = self._read_fraction(
+            self.component_enabled.get(), self.component_value, self.component_error, self.component_entry
+        )
+        flow_fraction = self._read_fraction(
+            self.flow_enabled.get(), self.flow_value, self.flow_error, self.flow_entry
+        )
+        return component_fraction, flow_fraction, self._read_dynamic_parameters()
+
+    def _calculate_sensitivity(self):
+        self._clear_errors()
+        try:
+            component_fraction, flow_fraction, dynamics = self._read_analysis_inputs()
+            controller = self._read_controller_parameters()
+            values = self._parse_sensitivity_values()
+            runs = sensitivity_runs(
+                self.chain, self.model_values, component_fraction, flow_fraction,
+                dynamics, controller, self.sensitivity_parameter.get(), values,
+            )
+        except ValueError as error:
+            self.sensitivity_summary.set(str(error))
+            self._set_status("Исправьте параметры анализа чувствительности", error=True)
+            return
+        self.sensitivity_data = {
+            "parameter": self.sensitivity_parameter.get(),
+            "runs": runs,
+        }
+        self.sensitivity_summary.set(
+            f"Построено кривых: {len(runs)}. Все остальные параметры взяты из текущего расчёта."
+        )
+        self._draw_sensitivity()
+        self._set_status("Анализ чувствительности построен")
+
+    def _parse_sensitivity_values(self):
+        source = [item.strip() for item in self.sensitivity_values.get().split(",") if item.strip()]
+        if not 2 <= len(source) <= 6:
+            raise ValueError("Укажите от 2 до 6 значений через запятую.")
+        parameter = self.sensitivity_parameter.get()
+        parser = (
+            parse_positive_number if parameter == "Постоянная времени T"
+            else parse_nonnegative_number if parameter == "Запаздывание L"
+            else parse_fraction
+        )
+        try:
+            values = tuple(parser(item) for item in source)
+        except ValueError as error:
+            raise ValueError(f"Значения параметра: {error}") from error
+        if len(set(values)) != len(values):
+            raise ValueError("Значения параметра не должны повторяться.")
+        return values
+
+    def _calculate_tuning_map(self):
+        self._clear_errors()
+        try:
+            component_fraction, flow_fraction, dynamics = self._read_analysis_inputs()
+            grid_size = self._parse_grid_size()
+            gain_min = parse_nonnegative_number(self.map_gain_min.get())
+            gain_max = parse_positive_number(self.map_gain_max.get())
+            if gain_max <= gain_min:
+                raise ValueError("Верхняя граница Kp должна быть больше нижней.")
+            controller_type = self.map_controller_type.get()
+            gains = tuple(np.linspace(gain_min, gain_max, grid_size))
+            if controller_type in ("PI", "PID"):
+                integral_min = parse_positive_number(self.map_integral_min.get())
+                integral_max = parse_positive_number(self.map_integral_max.get())
+                if integral_max <= integral_min:
+                    raise ValueError("Верхняя граница Ti должна быть больше нижней.")
+                integral_times = tuple(np.linspace(integral_min, integral_max, grid_size))
+            else:
+                integral_times = ()
+            derivative_time = (
+                parse_nonnegative_number(self.map_derivative_time.get())
+                if controller_type == "PID" else 0.0
+            )
+            map_data = controller_setting_map(
+                self.chain, self.model_values, component_fraction, flow_fraction, dynamics,
+                controller_type, gains, integral_times,
+                parse_positive_number(self.control_limit.get()),
+                parse_positive_number(self.setpoint.get()),
+                derivative_time=derivative_time,
+            )
+        except ValueError as error:
+            self.map_summary.set(str(error))
+            self._set_status("Исправьте параметры карты настроек", error=True)
+            return
+        self.map_data = map_data
+        self.map_selection = None
+        self.apply_map_selection_button.configure(state="disabled")
+        self.map_selection_summary.set("Щёлкните по ячейке карты, чтобы выбрать настройки и увидеть отклик.")
+        self.map_summary.set(
+            f"Построена карта {controller_type}: {map_data['categories'].shape[1]} × {map_data['categories'].shape[0]} точек"
+            + (f", Td={derivative_time:g} с." if controller_type == "PID" else ".")
+        )
+        self._draw_tuning_map()
+        self._set_status("Карта настроек построена")
+
+    def _parse_grid_size(self):
+        try:
+            grid_size = int(self.map_grid_size.get())
+        except ValueError as error:
+            raise ValueError("Размер сетки должен быть целым числом.") from error
+        if not 3 <= grid_size <= 15:
+            raise ValueError("Размер сетки должен быть в диапазоне 3…15.")
+        return grid_size
 
     def _build_result_card(self, parent):
         card = self._card(parent, 0)
@@ -1686,29 +1942,25 @@ class AbsorptionApp(ttk.Frame):
         dialog.resizable(False, False)
         dialog.transient(self.root)
         dialog.grab_set()
-        dialog.geometry("460x150")
+        dialog.geometry("520x165")
 
         name = tk.StringVar(value=initial_name)
         result = {"value": None}
         content = ttk.Frame(dialog, style="App.TFrame", padding=20)
         content.pack(fill="both", expand=True)
-        ttk.Label(content, text="Название опыта", style="CardTitle.TLabel").pack(anchor="w")
-        entry = ttk.Entry(content, textvariable=name, width=48)
+        ttk.Label(content, text="Название опыта", style="DialogLabel.TLabel").pack(anchor="w")
+        entry = ttk.Entry(content, textvariable=name, width=56)
         entry.pack(fill="x", pady=(8, 16))
 
         actions = ttk.Frame(content, style="App.TFrame")
         actions.pack(fill="x")
-        actions.columnconfigure(0, weight=1)
-
         def apply_name():
             result["value"] = name.get()
             dialog.destroy()
 
-        ttk.Button(actions, text="Отмена", command=dialog.destroy, style="Secondary.TButton").grid(
-            row=0, column=1, padx=(0, 8)
-        )
-        ttk.Button(actions, text="Переименовать", command=apply_name, style="Primary.TButton").grid(
-            row=0, column=2
+        ttk.Button(actions, text="Переименовать", command=apply_name, style="Primary.TButton").pack(side="right")
+        ttk.Button(actions, text="Отмена", command=dialog.destroy, style="Secondary.TButton").pack(
+            side="right", padx=(0, 8)
         )
         dialog.bind("<Return>", lambda _event: apply_name())
         dialog.bind("<Escape>", lambda _event: dialog.destroy())
@@ -2526,6 +2778,8 @@ class AbsorptionApp(ttk.Frame):
             variable.set("—")
 
     def _draw_static_charts(self):
+        self._remove_map_colorbar()
+        self._clear_map_click_callback()
         baseline = self._current_baseline()
         simulation_duration = self._safe_simulation_duration()
         time = np.linspace(0.0, simulation_duration, 501)
@@ -2545,10 +2799,153 @@ class AbsorptionApp(ttk.Frame):
         self._charts_show_comparison = False
 
     def _draw_last_calculation(self):
+        self._remove_map_colorbar()
+        self._clear_map_click_callback()
         if self.last_calculation is None:
             self._draw_static_charts()
         else:
             self._draw_calculation_result(self.last_calculation)
+
+    def _draw_sensitivity(self):
+        if self.current_page != "sensitivity" or self.sensitivity_data is None:
+            return
+        self._remove_controller_axis()
+        self._remove_map_colorbar()
+        self._clear_map_click_callback()
+        parameter = self.sensitivity_data["parameter"]
+        runs = self.sensitivity_data["runs"]
+        colors = ("#2563EB", "#F59E0B", "#16A34A", "#7C3AED", "#DB2777", "#0891B2")
+        self.primary_chart_title.set("Анализ чувствительности")
+        self.primary_chart_subtitle.set(f"Семейство кривых по параметру: {parameter}")
+        self._style_axis(self.disturbance_axis, "Время, с", "Концентрация")
+        for index, run in enumerate(runs):
+            result = run["result"]
+            value = run["value"]
+            suffix = "%" if parameter.startswith("Возмущение") else " с"
+            shown_value = value * 100 if parameter.startswith("Возмущение") else value
+            self.disturbance_axis.plot(
+                result["time"], result["final_response"], color=colors[index], linewidth=2.2,
+                label=f"{shown_value:g}{suffix}",
+            )
+        self.disturbance_axis.margins(x=0.02, y=0.12)
+        self._place_legend_above(self.disturbance_axis)
+        self.disturbance_canvas.draw_idle()
+
+        self.response_chart_title.set("Максимальное отклонение")
+        self.response_subtitle.set("Для каждого значения анализируемого параметра")
+        self._style_axis(self.response_axis, parameter, "Отклонение")
+        values = [run["value"] * 100 if parameter.startswith("Возмущение") else run["value"] for run in runs]
+        deviations = [run["result"]["metrics"]["maximum_deviation"] for run in runs]
+        self.response_axis.plot(values, deviations, color=ACCENT, marker="o", linewidth=2.2)
+        self.response_axis.grid(color=BORDER, linewidth=0.8)
+        self.response_canvas.draw_idle()
+        self._charts_show_comparison = True
+
+    def _draw_tuning_map(self):
+        if self.current_page != "tuning_map" or self.map_data is None:
+            return
+        self._remove_controller_axis()
+        self._remove_map_colorbar()
+        data = self.map_data
+        categories = data["categories"]
+        self.primary_chart_title.set(f"Карта настроек {data['controller_type']}-регулятора")
+        self.primary_chart_subtitle.set("Щёлкните по ячейке для просмотра соответствующего переходного процесса")
+        self._style_axis(self.disturbance_axis, "Kp", "Ti, с" if data["controller_type"] in ("PI", "PID") else "")
+        image = self.disturbance_axis.imshow(
+            categories, origin="lower", aspect="auto",
+            cmap=ListedColormap(("#BBF7D0", "#FDE68A", "#FCA5A5", "#BFDBFE")),
+            vmin=-0.5, vmax=len(MAP_CATEGORIES) - 0.5,
+        )
+        self.disturbance_axis.set_xticks(range(len(data["gains"])), [f"{value:.2g}" for value in data["gains"]])
+        if data["controller_type"] in ("PI", "PID"):
+            self.disturbance_axis.set_yticks(
+                range(len(data["integral_times"])), [f"{value:.2g}" for value in data["integral_times"]]
+            )
+        else:
+            self.disturbance_axis.set_yticks((0,), ("Ti не используется",))
+        if self.map_selection is not None:
+            row, column = self.map_selection
+            self.disturbance_axis.scatter((column,), (row,), s=500, facecolors="none", edgecolors=TEXT, linewidths=2)
+        self.map_colorbar = self.disturbance_axis.figure.colorbar(
+            image, ax=self.disturbance_axis, ticks=range(len(MAP_CATEGORIES)), pad=0.02
+        )
+        self.map_colorbar.ax.set_yticklabels(MAP_CATEGORIES)
+        self._ensure_map_click_callback()
+        self.disturbance_canvas.draw_idle()
+        self._draw_map_selection_response()
+        self._charts_show_comparison = True
+
+    def _draw_map_selection_response(self):
+        self.response_chart_title.set("Переходный процесс выбранной точки")
+        self.response_subtitle.set("Выберите ячейку карты")
+        self._style_axis(self.response_axis, "Время, с", "Концентрация")
+        if self.map_selection is None:
+            self.response_axis.text(0.5, 0.5, "Ячейка не выбрана", transform=self.response_axis.transAxes, ha="center", va="center", color=MUTED)
+        else:
+            row, column = self.map_selection
+            result = self.map_data["results"][row][column]
+            self.response_axis.plot(result["time"], result["final_response"], color=ACCENT, linewidth=2.4, label="Выбранная настройка")
+            self.response_axis.axhline(result["controller"]["setpoint"], color=MUTED, linestyle="--", label="Задание")
+            self._place_legend_above(self.response_axis)
+            self.response_subtitle.set(self.map_selection_summary.get())
+        self.response_canvas.draw_idle()
+
+    def _ensure_map_click_callback(self):
+        if self.map_click_callback is None:
+            self.map_click_callback = self.disturbance_canvas.mpl_connect("button_press_event", self._select_map_cell)
+
+    def _clear_map_click_callback(self):
+        if self.map_click_callback is not None:
+            self.disturbance_canvas.mpl_disconnect(self.map_click_callback)
+            self.map_click_callback = None
+
+    def _remove_map_colorbar(self):
+        if self.map_colorbar is not None:
+            self.map_colorbar.remove()
+            self.map_colorbar = None
+
+    def _select_map_cell(self, event):
+        if (
+            self.current_page != "tuning_map"
+            or self.map_data is None
+            or event.inaxes is not self.disturbance_axis
+            or event.xdata is None
+            or event.ydata is None
+        ):
+            return
+        column = int(round(event.xdata))
+        row = int(round(event.ydata))
+        categories = self.map_data["categories"]
+        if not (0 <= row < categories.shape[0] and 0 <= column < categories.shape[1]):
+            return
+        self.map_selection = (row, column)
+        gain = self.map_data["gains"][column]
+        integral_time = self.map_data["integral_times"][row]
+        category = MAP_CATEGORIES[categories[row, column]]
+        settings = f"Kp={gain:.3g}"
+        if integral_time is not None:
+            settings += f", Ti={integral_time:.3g} с"
+        if self.map_data["derivative_time"] is not None:
+            settings += f", Td={self.map_data['derivative_time']:.3g} с"
+        self.map_selection_summary.set(f"{settings}. Категория: {category}.")
+        self.apply_map_selection_button.configure(state="normal")
+        self._draw_tuning_map()
+
+    def _apply_map_selection(self):
+        if self.map_data is None or self.map_selection is None:
+            return
+        row, column = self.map_selection
+        self.controller_type.set(self.map_data["controller_type"])
+        self._set_controller_mode(True)
+        self.proportional_gain.set(self._format_number(self.map_data["gains"][column]))
+        integral_time = self.map_data["integral_times"][row]
+        if integral_time is not None:
+            self.integral_time.set(self._format_number(integral_time))
+        if self.map_data["derivative_time"] is not None:
+            self.derivative_time.set(self._format_number(self.map_data["derivative_time"]))
+        self._update_controller_type()
+        self._show_page("controller")
+        self._calculate()
 
     def _draw_calculation_result(self, result):
         dynamics = result["dynamics"]

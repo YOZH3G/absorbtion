@@ -115,6 +115,42 @@ ICON_PATTERNS = {
         "................",
         "................",
     ),
+    "sensitivity": (
+        "................",
+        "................",
+        "...#............",
+        "...#............",
+        "...#......#.....",
+        "...#.....#.#....",
+        "...#....#...#...",
+        "...#...#.....#..",
+        "...#..#.......#.",
+        "...#.#.........#",
+        "...##...........",
+        ".###............",
+        "................",
+        "................",
+        "................",
+        "................",
+    ),
+    "tuning_map": (
+        "................",
+        "..###.###.###...",
+        "..#.#.#.#.#.#...",
+        "..###.###.###...",
+        "................",
+        "..###.###.###...",
+        "..#.#.#.#.#.#...",
+        "..###.###.###...",
+        "................",
+        "..###.###.###...",
+        "..#.#.#.#.#.#...",
+        "..###.###.###...",
+        "................",
+        "................",
+        "................",
+        "................",
+    ),
     "export": (
         ".......##.......",
         ".......##.......",
@@ -386,9 +422,9 @@ class ScrollablePage(ttk.Frame):
             highlightthickness=0,
         )
         self.canvas.grid(row=0, column=0, sticky="nsew")
-        scrollbar = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
-        scrollbar.grid(row=0, column=1, sticky="ns")
-        self.canvas.configure(yscrollcommand=scrollbar.set)
+        self.scrollbar = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
+        self.scrollbar.grid(row=0, column=1, sticky="ns")
+        self.canvas.configure(yscrollcommand=self.scrollbar.set)
         self.content = ttk.Frame(self.canvas, style="App.TFrame")
         self.content.columnconfigure(0, weight=1)
         self._window_id = self.canvas.create_window(
@@ -398,6 +434,7 @@ class ScrollablePage(ttk.Frame):
         )
         self.content.bind("<Configure>", self._update_scroll_region)
         self.canvas.bind("<Configure>", self._fit_content_width)
+        self._scrolling_enabled = False
 
     def bind_mousewheel(self):
         self.canvas.bind("<MouseWheel>", self._on_mousewheel, add="+")
@@ -408,11 +445,29 @@ class ScrollablePage(ttk.Frame):
 
     def _update_scroll_region(self, _event=None):
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+        self._update_scroll_state()
 
     def _fit_content_width(self, event):
         self.canvas.itemconfigure(self._window_id, width=event.width)
+        self._update_scroll_state()
+
+    def _update_scroll_state(self):
+        bounds = self.canvas.bbox("all")
+        content_height = 0 if bounds is None else bounds[3] - bounds[1]
+        should_scroll = content_height > self.canvas.winfo_height()
+        if should_scroll == self._scrolling_enabled:
+            return
+
+        self._scrolling_enabled = should_scroll
+        if should_scroll:
+            self.scrollbar.grid()
+        else:
+            self.canvas.yview_moveto(0.0)
+            self.scrollbar.grid_remove()
 
     def _on_mousewheel(self, event):
+        if not self._scrolling_enabled:
+            return
         self.canvas.yview_scroll(int(-event.delta / 120), "units")
 
     def _bind_descendants(self, widget):
