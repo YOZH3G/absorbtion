@@ -1,5 +1,7 @@
+import csv
 import tkinter as tk
-from tkinter import ttk
+from pathlib import Path
+from tkinter import filedialog, ttk
 
 import numpy as np
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
@@ -20,6 +22,15 @@ from calculations import (
     first_order_response,
     transition_metrics,
     tune_controller_parameters,
+)
+from laboratory import (
+    CORRECTION_OPTIONS,
+    DIRECTION_OPTIONS,
+    FASTEST_OPTIONS,
+    SCENARIOS,
+    SCENARIOS_BY_NAME,
+    evaluate_prediction,
+    format_protocol,
 )
 from validation import parse_fraction, parse_nonnegative_number, parse_positive_number
 
@@ -129,6 +140,20 @@ class AbsorptionApp(ttk.Frame):
         self.primary_chart_subtitle = tk.StringVar(value="Изменение относительно базового уровня")
         self.response_chart_title = tk.StringVar(value="Кривая разгона")
         self.status_text = tk.StringVar(value="Готово к расчёту")
+        self.selected_scenario = tk.StringVar(value=SCENARIOS[0]["name"])
+        self.scenario_description = tk.StringVar(value=SCENARIOS[0]["description"])
+        self.active_scenario = tk.StringVar(value="Сценарий ещё не применён.")
+        self.assignment_enabled = tk.BooleanVar(value=False)
+        self.predicted_direction = tk.StringVar()
+        self.predicted_steady = tk.StringVar()
+        self.predicted_fastest = tk.StringVar()
+        self.predicted_correction = tk.StringVar()
+        self.assignment_feedback = tk.StringVar(
+            value="Включите режим задания и заполните прогноз до расчёта."
+        )
+        self.export_summary = tk.StringVar(value="Сначала выполните расчёт.")
+        self.export_buttons = []
+        self.last_calculation = None
         self.controller_signal_axis = None
 
         self._configure_window()
@@ -168,8 +193,6 @@ class AbsorptionApp(ttk.Frame):
         style.map("SidebarNav.TButton", background=[("active", "#193553")])
         style.configure("SelectedSidebarNav.TButton", background=ACCENT, foreground="#FFFFFF", borderwidth=0, padding=(18, 13), font=("Segoe UI", 10, "bold"), anchor="w")
         style.map("SelectedSidebarNav.TButton", background=[("active", ACCENT_ACTIVE)])
-        style.configure("FutureSidebarNav.TButton", background=SIDEBAR, foreground="#687B94", borderwidth=0, padding=(18, 13), font=("Segoe UI", 10), anchor="w")
-        style.map("FutureSidebarNav.TButton", background=[("disabled", SIDEBAR)], foreground=[("disabled", "#687B94")])
         style.configure("SectionHeader.TLabel", background=BACKGROUND, foreground=TEXT, font=("Segoe UI", 15, "bold"))
         style.configure("MetricTitle.TLabel", background=CARD_BACKGROUND, foreground=MUTED, font=("Segoe UI", 9))
         style.configure("MetricValue.TLabel", background=CARD_BACKGROUND, foreground=TEXT, font=("Segoe UI", 18, "bold"))
@@ -217,15 +240,15 @@ class AbsorptionApp(ttk.Frame):
             ("dynamics", "Динамика"),
             ("results", "Результаты"),
             ("controller", "Регулятор"),
+            ("scenarios", "Сценарии"),
+            ("export", "Экспорт"),
         )
         for row, (key, label) in enumerate(active_navigation, start=2):
             button = ttk.Button(sidebar, text=label, command=lambda page=key: self._show_page(page), style="SidebarNav.TButton")
             button.grid(row=row, column=0, sticky="ew", pady=2)
             self.nav_buttons[key] = button
 
-        ttk.Separator(sidebar).grid(row=6, column=0, sticky="ew", padx=8, pady=16)
-        for row, label in enumerate(("Сценарии · скоро", "Экспорт · скоро"), start=7):
-            ttk.Button(sidebar, text=label, state="disabled", style="FutureSidebarNav.TButton").grid(row=row, column=0, sticky="ew", pady=2)
+        ttk.Separator(sidebar).grid(row=8, column=0, sticky="ew", padx=8, pady=16)
 
         inspector = ttk.Frame(body, style="App.TFrame", padding=(16, 16, 12, 12))
         inspector.grid(row=0, column=1, sticky="nsew")
@@ -237,7 +260,7 @@ class AbsorptionApp(ttk.Frame):
         page_host.grid(row=1, column=0, sticky="nsew")
         page_host.columnconfigure(0, weight=1)
         page_host.rowconfigure(0, weight=1)
-        for key in ("disturbances", "dynamics", "results", "controller"):
+        for key in ("disturbances", "dynamics", "results", "controller", "scenarios", "export"):
             page = ttk.Frame(page_host, style="App.TFrame")
             page.grid(row=0, column=0, sticky="nsew")
             page.columnconfigure(0, weight=1)
@@ -249,6 +272,8 @@ class AbsorptionApp(ttk.Frame):
         self._build_dynamics_card(self.pages["dynamics"])
         self._build_result_card(self.pages["results"])
         self._build_controller_card(self.pages["controller"])
+        self._build_scenarios_card(self.pages["scenarios"])
+        self._build_export_card(self.pages["export"])
 
         actions = ttk.Frame(inspector, style="App.TFrame")
         actions.grid(row=2, column=0, sticky="ew", pady=(12, 0))
@@ -306,6 +331,8 @@ class AbsorptionApp(ttk.Frame):
             "dynamics": "Динамика объекта",
             "results": "Результаты расчёта",
             "controller": "Регулятор",
+            "scenarios": "Лабораторные сценарии",
+            "export": "Экспорт результатов",
         }
         self.pages[page].tkraise()
         self.page_title.set(titles[page])
@@ -743,6 +770,135 @@ class AbsorptionApp(ttk.Frame):
             )
         metrics.columnconfigure(0, weight=1)
 
+    def _build_scenarios_card(self, parent):
+        scenario_card = self._card(parent, 0)
+        ttk.Label(scenario_card, text="Готовый сценарий", style="CardTitle.TLabel").grid(
+            row=0, column=0, sticky="w", pady=(0, 10)
+        )
+        scenario_box = ttk.Combobox(
+            scenario_card,
+            textvariable=self.selected_scenario,
+            values=tuple(scenario["name"] for scenario in SCENARIOS),
+            state="readonly",
+        )
+        scenario_box.grid(row=1, column=0, sticky="ew")
+        scenario_box.bind("<<ComboboxSelected>>", self._update_scenario_description)
+        ttk.Label(
+            scenario_card,
+            textvariable=self.scenario_description,
+            style="Muted.TLabel",
+            wraplength=330,
+        ).grid(row=2, column=0, sticky="w", pady=(8, 12))
+        ttk.Button(
+            scenario_card,
+            text="Применить сценарий",
+            command=self._apply_scenario,
+            style="Primary.TButton",
+        ).grid(row=3, column=0, sticky="ew")
+        ttk.Label(
+            scenario_card,
+            textvariable=self.active_scenario,
+            style="Muted.TLabel",
+            wraplength=330,
+        ).grid(row=4, column=0, sticky="w", pady=(8, 0))
+
+        assignment = self._card(parent, 1, padding=(14, 12))
+        ttk.Checkbutton(
+            assignment,
+            text="Режим задания: сначала сделать прогноз",
+            variable=self.assignment_enabled,
+            command=self._update_assignment_states,
+        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 10))
+        prediction_fields = (
+            ("Направление изменения выхода", self.predicted_direction, DIRECTION_OPTIONS, "direction_prediction"),
+            ("Какая реакция завершится быстрее", self.predicted_fastest, FASTEST_OPTIONS, "fastest_prediction"),
+            ("Устранит ли регулятор отклонение", self.predicted_correction, CORRECTION_OPTIONS, "correction_prediction"),
+        )
+        self.prediction_widgets = []
+        row = 1
+        for label, variable, values, attribute in prediction_fields:
+            ttk.Label(assignment, text=label, style="Body.TLabel", wraplength=160).grid(
+                row=row, column=0, sticky="w", pady=4
+            )
+            widget = ttk.Combobox(
+                assignment,
+                textvariable=variable,
+                values=values,
+                state="disabled",
+                width=20,
+            )
+            widget.grid(row=row, column=1, sticky="e", padx=(8, 0), pady=4)
+            setattr(self, attribute, widget)
+            self.prediction_widgets.append(widget)
+            row += 1
+        ttk.Label(assignment, text="Ожидаемое установившееся значение", style="Body.TLabel", wraplength=170).grid(
+            row=row, column=0, sticky="w", pady=4
+        )
+        self.steady_prediction = ttk.Entry(
+            assignment,
+            textvariable=self.predicted_steady,
+            state="disabled",
+            width=22,
+        )
+        self.steady_prediction.grid(row=row, column=1, sticky="e", padx=(8, 0), pady=4)
+        self.prediction_widgets.append(self.steady_prediction)
+        assignment.columnconfigure(0, weight=1)
+
+        feedback = self._card(parent, 2, padding=(14, 12))
+        ttk.Label(feedback, text="Проверка прогноза", style="CardTitle.TLabel").grid(
+            row=0, column=0, sticky="w", pady=(0, 8)
+        )
+        ttk.Label(
+            feedback,
+            textvariable=self.assignment_feedback,
+            style="Body.TLabel",
+            justify="left",
+            wraplength=330,
+        ).grid(row=1, column=0, sticky="w")
+
+    def _build_export_card(self, parent):
+        card = self._card(parent, 0)
+        ttk.Label(card, text="Материалы для отчёта", style="CardTitle.TLabel").grid(
+            row=0, column=0, sticky="w", pady=(0, 8)
+        )
+        ttk.Label(
+            card,
+            textvariable=self.export_summary,
+            style="Muted.TLabel",
+            wraplength=330,
+        ).grid(row=1, column=0, sticky="w", pady=(0, 14))
+        actions = (
+            ("Сохранить два графика PNG", self._export_graphs_png),
+            ("Экспортировать точки CSV", self._export_csv),
+            ("Копировать параметры и результаты", self._copy_protocol),
+            ("Сохранить протокол TXT", self._save_protocol),
+        )
+        for row, (label, command) in enumerate(actions, start=2):
+            button = ttk.Button(
+                card,
+                text=label,
+                command=command,
+                style="Primary.TButton" if row == 2 else "Secondary.TButton",
+                state="disabled",
+            )
+            button.grid(row=row, column=0, sticky="ew", pady=(0, 8))
+            self.export_buttons.append(button)
+
+        note = self._card(parent, 1)
+        ttk.Label(note, text="Состав файлов", style="CardTitle.TLabel").grid(
+            row=0, column=0, sticky="w", pady=(0, 8)
+        )
+        ttk.Label(
+            note,
+            text=(
+                "PNG сохраняет оба текущих графика. CSV содержит временную сетку, воздействие, "
+                "целевые значения и рассчитанные отклики. Протокол TXT включает параметры и показатели."
+            ),
+            style="Body.TLabel",
+            wraplength=330,
+            justify="left",
+        ).grid(row=1, column=0, sticky="w")
+
     def _build_chart_card(
         self,
         parent,
@@ -794,6 +950,228 @@ class AbsorptionApp(ttk.Frame):
             ttk.Button(tools, text=label, command=command, style="Toolbar.TButton", width=7).grid(row=0, column=column, padx=(4, 0))
 
         return axis, canvas, toolbar
+
+    def _update_scenario_description(self, _event=None):
+        scenario = SCENARIOS_BY_NAME[self.selected_scenario.get()]
+        self.scenario_description.set(scenario["description"])
+
+    def _apply_scenario(self):
+        scenario = SCENARIOS_BY_NAME[self.selected_scenario.get()]
+        self._select_chain(scenario["chain"])
+        self.component_enabled.set(scenario["component"] is not None)
+        self.flow_enabled.set(scenario["flow"] is not None)
+        self.component_value.set(
+            "" if scenario["component"] is None else self._format_number(scenario["component"])
+        )
+        self.flow_value.set(
+            "" if scenario["flow"] is None else self._format_number(scenario["flow"])
+        )
+        self.disturbance_type.set(scenario["disturbance_type"])
+        self.start_time.set(self._format_number(scenario["start_time"]))
+        self.simulation_duration.set(self._format_number(scenario["simulation_duration"]))
+        self.effect_duration.set(self._format_number(scenario["effect_duration"]))
+        self.time_constant.set(self._format_number(scenario["time_constant"]))
+        self.delay.set(self._format_number(scenario["delay"]))
+        self._update_disturbance_type()
+
+        controller = scenario["controller"]
+        if controller is None:
+            self._set_controller_mode(False)
+        else:
+            self.controller_type.set(controller["type"])
+            self._update_controller_type()
+            self._set_controller_mode(True)
+            self.proportional_gain.set(self._format_number(controller["gain"]))
+            self.integral_time.set(self._format_number(controller["integral_time"]))
+            self.derivative_time.set(self._format_number(controller["derivative_time"]))
+            self.control_limit.set(self._format_number(controller["control_limit"]))
+            self.setpoint.set(self._format_number(self._current_baseline()))
+
+        self._update_input_states()
+        self._clear_result_values()
+        self.predicted_direction.set("")
+        self.predicted_steady.set("")
+        self.predicted_fastest.set("")
+        self.predicted_correction.set("")
+        self.assignment_feedback.set("Заполните прогноз и нажмите «Рассчитать».")
+        self.active_scenario.set(f"Применён: {scenario['name']}.")
+        self._draw_static_charts()
+        self._show_page("scenarios")
+        self._set_status("Сценарий применён — выполните расчёт")
+
+    def _update_assignment_states(self):
+        enabled = self.assignment_enabled.get()
+        for widget in self.prediction_widgets:
+            widget.configure(state="normal" if enabled else "disabled")
+        for widget in (
+            self.direction_prediction,
+            self.fastest_prediction,
+            self.correction_prediction,
+        ):
+            widget.configure(state="readonly" if enabled else "disabled")
+        self.assignment_feedback.set(
+            "Заполните прогноз и нажмите «Рассчитать»."
+            if enabled
+            else "Включите режим задания и заполните прогноз до расчёта."
+        )
+
+    def _read_prediction(self):
+        if not self.assignment_enabled.get():
+            return None
+        self.steady_prediction.configure(style="TEntry")
+        if not all((
+            self.predicted_direction.get(),
+            self.predicted_fastest.get(),
+            self.predicted_correction.get(),
+            self.predicted_steady.get().strip(),
+        )):
+            self.assignment_feedback.set("Заполните все четыре поля прогноза до расчёта.")
+            self._show_page("scenarios")
+            raise ValueError("Прогноз заполнен не полностью.")
+        try:
+            steady = parse_positive_number(self.predicted_steady.get())
+        except ValueError as error:
+            self.steady_prediction.configure(style="Error.TEntry")
+            self.assignment_feedback.set(f"Установившееся значение: {error}")
+            self._show_page("scenarios")
+            raise
+        return {
+            "direction": self.predicted_direction.get(),
+            "steady": steady,
+            "fastest": self.predicted_fastest.get(),
+            "correction": self.predicted_correction.get(),
+        }
+
+    def _evaluate_assignment(self, prediction, outcome):
+        if prediction is None:
+            return
+        evaluation = evaluate_prediction(prediction, outcome)
+        self.assignment_feedback.set(
+            f"Результат: {evaluation['score']} из {evaluation['total']}.\n"
+            + "\n".join(evaluation["lines"])
+        )
+
+    def _export_graphs_png(self):
+        selected = filedialog.asksaveasfilename(
+            parent=self.root,
+            title="Сохранить графики",
+            defaultextension=".png",
+            filetypes=(("PNG", "*.png"),),
+            initialfile="absorption_result.png",
+        )
+        if not selected:
+            return
+        base = Path(selected)
+        stem = base.with_suffix("")
+        signal_path = stem.with_name(f"{stem.name}_signals.png")
+        response_path = stem.with_name(f"{stem.name}_response.png")
+        try:
+            self.disturbance_axis.figure.savefig(signal_path, dpi=160, bbox_inches="tight")
+            self.response_axis.figure.savefig(response_path, dpi=160, bbox_inches="tight")
+        except OSError as error:
+            self._set_status(f"Не удалось сохранить PNG: {error}", error=True)
+            return
+        self.export_summary.set(f"Сохранены: {signal_path.name}, {response_path.name}.")
+        self._set_status("Графики сохранены в PNG")
+
+    def _export_csv(self):
+        selected = filedialog.asksaveasfilename(
+            parent=self.root,
+            title="Экспортировать точки",
+            defaultextension=".csv",
+            filetypes=(("CSV", "*.csv"),),
+            initialfile="absorption_result.csv",
+        )
+        if not selected:
+            return
+        result = self.last_calculation
+        columns = [
+            ("Время, с", result["time"]),
+            ("Профиль воздействия", result["profile"]),
+            ("Цель: совместное воздействие", result["targets"]["Совместное воздействие"]),
+        ]
+        columns.extend(
+            (f"Отклик: {label}", values)
+            for label, values in result["responses"].items()
+        )
+        if result["controlled_response"] is not None:
+            columns.extend((
+                ("Регулируемый выход", result["controlled_response"]),
+                ("Ошибка e(t)", result["error"]),
+                ("Управляющее воздействие u(t)", result["control"]),
+            ))
+        try:
+            with open(selected, "w", encoding="utf-8-sig", newline="") as file:
+                writer = csv.writer(file, delimiter=";")
+                writer.writerow(label for label, _values in columns)
+                writer.writerows(zip(*(values for _label, values in columns)))
+        except OSError as error:
+            self._set_status(f"Не удалось сохранить CSV: {error}", error=True)
+            return
+        self.export_summary.set(f"Точки сохранены: {Path(selected).name}.")
+        self._set_status("Точки экспортированы в CSV")
+
+    def _copy_protocol(self):
+        protocol = self._build_protocol_text()
+        self.root.clipboard_clear()
+        self.root.clipboard_append(protocol)
+        self.root.update_idletasks()
+        self.export_summary.set("Параметры и результаты скопированы в буфер обмена.")
+        self._set_status("Протокол скопирован")
+
+    def _save_protocol(self):
+        selected = filedialog.asksaveasfilename(
+            parent=self.root,
+            title="Сохранить протокол",
+            defaultextension=".txt",
+            filetypes=(("Текстовый файл", "*.txt"),),
+            initialfile="absorption_protocol.txt",
+        )
+        if not selected:
+            return
+        try:
+            Path(selected).write_text(self._build_protocol_text(), encoding="utf-8")
+        except OSError as error:
+            self._set_status(f"Не удалось сохранить протокол: {error}", error=True)
+            return
+        self.export_summary.set(f"Протокол сохранён: {Path(selected).name}.")
+        self._set_status("Протокол сохранён")
+
+    def _build_protocol_text(self):
+        result = self.last_calculation
+        controller = result["controller"]
+        parameters = [
+            ("Цепь", "Обеднённый газ" if result["chain"] == LEAN_GAS else "Насыщенный абсорбент"),
+            ("Возмущение состава", f"{result['component_fraction'] * 100:+.1f}%"),
+            ("Возмущение расхода", f"{result['flow_fraction'] * 100:+.1f}%"),
+            ("Вид воздействия", result["disturbance_type"]),
+            ("Начало воздействия", f"{result['dynamics']['start_time']:g} с"),
+            ("Длительность моделирования", f"{result['dynamics']['simulation_duration']:g} с"),
+            ("Постоянная времени T", f"{result['dynamics']['time_constant']:g} с"),
+            ("Запаздывание L", f"{result['dynamics']['delay']:g} с"),
+            ("Режим", self.result_mode.get()),
+        ]
+        if controller is not None:
+            parameters.extend((
+                ("K", f"{controller['controller_gain']:g}"),
+                ("Ti", f"{controller['integral_time']:g} с" if "I" in controller["controller_type"] else "не используется"),
+                ("Td", f"{controller['derivative_time']:g} с" if "D" in controller["controller_type"] else "не используется"),
+                ("Ограничение |u|", f"{controller['control_limit']:g}"),
+                ("Задание", f"{controller['setpoint']:g}"),
+            ))
+        results = [
+            ("Базовое значение", self.baseline_result.get()),
+            ("Суммарная доля", self.disturbance_result.get()),
+            ("Расчётное значение", self.calculated_result.get()),
+            ("В конце моделирования", self.final_result.get()),
+            ("Установившееся значение", self.transition_values["steady"].get()),
+            ("Максимальное отклонение", self.transition_values["maximum_deviation"].get()),
+            ("Относительное отклонение", self.transition_values["relative_deviation"].get()),
+            (self.settling_time_label.get(), self.transition_values["settling_time"].get()),
+            ("Статическая ошибка", self.transition_values["static_error"].get()),
+        ]
+        title = self.active_scenario.get() if self.active_scenario.get().startswith("Применён:") else "Свободный расчёт"
+        return format_protocol(title, parameters, results)
 
     def _select_chain(self, chain):
         self.chain = chain
@@ -1119,6 +1497,7 @@ class AbsorptionApp(ttk.Frame):
     def _calculate(self):
         self._clear_errors()
         try:
+            prediction = self._read_prediction()
             component_fraction = self._read_fraction(
                 self.component_enabled.get(), self.component_value, self.component_error, self.component_entry
             )
@@ -1180,6 +1559,15 @@ class AbsorptionApp(ttk.Frame):
             )
             for label, target in targets.items()
         }
+        open_metrics = transition_metrics(
+            time,
+            responses["Совместное воздействие"],
+            targets["Совместное воздействие"],
+            baseline,
+        )
+        controlled_response = None
+        error = None
+        control = None
 
         self.baseline_result.set(self._format_number(baseline))
         self.disturbance_result.set(f"{self._format_number(combined_fraction)} ({combined_fraction * 100:+.1f}%)")
@@ -1193,12 +1581,7 @@ class AbsorptionApp(ttk.Frame):
         )
         if controller is None:
             final_response = responses["Совместное воздействие"]
-            metrics = transition_metrics(
-                time,
-                final_response,
-                targets["Совместное воздействие"],
-                baseline,
-            )
+            metrics = open_metrics
             self.result_mode.set("Без регулятора")
             metric_response_start = dynamics["start_time"] + dynamics["delay"]
             self._draw_disturbance(time, profile, component_fraction, flow_fraction)
@@ -1250,7 +1633,60 @@ class AbsorptionApp(ttk.Frame):
 
         self.final_result.set(self._format_number(final_response[-1]))
         self._update_transition_metrics(metrics, dynamics, metric_response_start)
-        self._show_page("results")
+        open_duration = (
+            None
+            if open_metrics["settling_time"] is None
+            else max(
+                0.0,
+                open_metrics["settling_time"] - dynamics["start_time"] - dynamics["delay"],
+            )
+        )
+        controlled_duration = (
+            None
+            if controller is None or metrics["settling_time"] is None
+            else max(0.0, metrics["settling_time"] - metric_response_start)
+        )
+        correction = "Регулятор выключен"
+        if controller is not None:
+            correction_tolerance = max(abs(controller["setpoint"]) * 0.01, 1e-6)
+            correction = (
+                "Да"
+                if metrics["settling_time"] is not None
+                and abs(metrics["static_error"]) <= correction_tolerance
+                else "Нет"
+            )
+        self.last_calculation = {
+            "chain": self.chain,
+            "component_fraction": component_fraction,
+            "flow_fraction": flow_fraction,
+            "disturbance_type": self.disturbance_type.get(),
+            "dynamics": dynamics,
+            "controller": controller,
+            "time": time,
+            "profile": profile,
+            "targets": targets,
+            "responses": responses,
+            "controlled_response": controlled_response,
+            "error": error,
+            "control": control,
+            "metrics": metrics,
+        }
+        for button in self.export_buttons:
+            button.configure(state="normal")
+        self.export_summary.set("Расчёт готов к экспорту.")
+        self._evaluate_assignment(
+            prediction,
+            {
+                "baseline": baseline,
+                "disturbed_value": calculated,
+                "steady_value": metrics["steady_state"],
+                "open_duration": open_duration,
+                "controlled_duration": controlled_duration,
+                "controller_enabled": controller is not None,
+                "correction": correction,
+            },
+        )
+        self._show_page("scenarios" if prediction is not None else "results")
         self._set_status("Расчёт выполнен")
 
     def _update_calculation_steps(
@@ -1312,6 +1748,12 @@ class AbsorptionApp(ttk.Frame):
         self._set_status("Готово к расчёту")
 
     def _clear_result_values(self):
+        self.last_calculation = None
+        if hasattr(self, "export_buttons"):
+            for button in self.export_buttons:
+                button.configure(state="disabled")
+        if hasattr(self, "export_summary"):
+            self.export_summary.set("Сначала выполните расчёт.")
         self.baseline_result.set("—")
         self.disturbance_result.set("—")
         self.calculated_result.set("—")
