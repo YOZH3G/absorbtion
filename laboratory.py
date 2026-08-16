@@ -1,97 +1,16 @@
-SCENARIOS = (
-    {
-        "name": "Увеличение расхода на 10%",
-        "description": "Ступенчатое увеличение расхода газовой смеси без регулятора.",
-        "chain": "lean_gas",
-        "component": None,
-        "flow": 0.10,
-        "disturbance_type": "Ступенчатое",
-        "start_time": 10.0,
-        "simulation_duration": 100.0,
-        "effect_duration": 10.0,
-        "time_constant": 10.0,
-        "delay": 2.0,
-        "controller": None,
-    },
-    {
-        "name": "Снижение состава на 15%",
-        "description": "Ступенчатое снижение состава исходного абсорбента.",
-        "chain": "rich_absorbent",
-        "component": -0.15,
-        "flow": None,
-        "disturbance_type": "Ступенчатое",
-        "start_time": 10.0,
-        "simulation_duration": 100.0,
-        "effect_duration": 10.0,
-        "time_constant": 10.0,
-        "delay": 2.0,
-        "controller": None,
-    },
-    {
-        "name": "Противоположные воздействия",
-        "description": "Состав увеличивается на 20%, а расход одновременно снижается на 10%.",
-        "chain": "lean_gas",
-        "component": 0.20,
-        "flow": -0.10,
-        "disturbance_type": "Ступенчатое",
-        "start_time": 10.0,
-        "simulation_duration": 100.0,
-        "effect_duration": 10.0,
-        "time_constant": 10.0,
-        "delay": 2.0,
-        "controller": None,
-    },
-    {
-        "name": "Слабое длительное возмущение",
-        "description": "Увеличение состава на 3% в течение 40 секунд.",
-        "chain": "rich_absorbent",
-        "component": 0.03,
-        "flow": None,
-        "disturbance_type": "Временное прямоугольное",
-        "start_time": 10.0,
-        "simulation_duration": 100.0,
-        "effect_duration": 40.0,
-        "time_constant": 10.0,
-        "delay": 2.0,
-        "controller": None,
-    },
-    {
-        "name": "Кратковременный выброс",
-        "description": "Импульсное увеличение состава газа на 50% длительностью 6 секунд.",
-        "chain": "lean_gas",
-        "component": 0.50,
-        "flow": None,
-        "disturbance_type": "Импульсное",
-        "start_time": 10.0,
-        "simulation_duration": 80.0,
-        "effect_duration": 6.0,
-        "time_constant": 10.0,
-        "delay": 2.0,
-        "controller": None,
-    },
-    {
-        "name": "Неверно настроенный регулятор",
-        "description": "Агрессивный PI-регулятор демонстрирует колебательную реакцию.",
-        "chain": "lean_gas",
-        "component": None,
-        "flow": 0.20,
-        "disturbance_type": "Ступенчатое",
-        "start_time": 10.0,
-        "simulation_duration": 100.0,
-        "effect_duration": 10.0,
-        "time_constant": 10.0,
-        "delay": 2.0,
-        "controller": {
-            "type": "PI",
-            "gain": 6.0,
-            "integral_time": 2.0,
-            "derivative_time": 0.0,
-            "control_limit": 100.0,
-        },
-    },
-)
+import json
+from pathlib import Path
 
-SCENARIOS_BY_NAME = {scenario["name"]: scenario for scenario in SCENARIOS}
+
+def _load_builtin_scenarios():
+    path = Path(__file__).with_name("builtin_scenarios.json")
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if payload.get("version") != 1 or not isinstance(payload.get("scenarios"), list):
+        raise ValueError("Некорректный формат встроенных сценариев.")
+    return tuple(payload["scenarios"])
+
+
+SCENARIOS = _load_builtin_scenarios()
 
 DIRECTION_OPTIONS = ("Увеличится", "Уменьшится", "Не изменится")
 FASTEST_OPTIONS = ("Без регулятора", "С регулятором", "Одинаково", "Без сравнения")
@@ -121,7 +40,7 @@ def expected_fastest(open_duration, controlled_duration, controller_enabled):
     return "Без регулятора" if open_duration < controlled_duration else "С регулятором"
 
 
-def evaluate_prediction(prediction, outcome):
+def evaluate_prediction(prediction, outcome, steady_tolerance_percent=5.0):
     expected = {
         "direction": expected_direction(outcome["baseline"], outcome["disturbed_value"]),
         "steady": outcome["steady_value"],
@@ -132,7 +51,10 @@ def evaluate_prediction(prediction, outcome):
         ),
         "correction": outcome["correction"],
     }
-    steady_tolerance = max(abs(expected["steady"]) * 0.05, 0.01)
+    steady_tolerance = max(
+        abs(expected["steady"]) * steady_tolerance_percent / 100.0,
+        0.01,
+    )
     checks = (
         (prediction["direction"] == expected["direction"], "Направление", expected["direction"]),
         (

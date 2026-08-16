@@ -1,0 +1,95 @@
+{
+  "version": 1,
+  "scenarios": [
+    {
+      "name": "Увеличение расхода на 10%",
+      "description": "Ступенчатое увеличение расхода газовой смеси без регулятора.",
+      "chain": "lean_gas",
+      "component": null,
+      "flow": 0.1,
+      "disturbance_type": "Ступенчатое",
+      "start_time": 10.0,
+      "simulation_duration": 100.0,
+      "effect_duration": 10.0,
+      "time_constant": 10.0,
+      "delay": 2.0,
+      "controller": null
+    },
+    {
+      "name": "Снижение состава на 15%",
+      "description": "Ступенчатое снижение состава исходного абсорбента.",
+      "chain": "rich_absorbent",
+      "component": -0.15,
+      "flow": null,
+      "disturbance_type": "Ступенчатое",
+      "start_time": 10.0,
+      "simulation_duration": 100.0,
+      "effect_duration": 10.0,
+      "time_constant": 10.0,
+      "delay": 2.0,
+      "controller": null
+    },
+    {
+      "name": "Противоположные воздействия",
+      "description": "Состав увеличивается на 20%, а расход одновременно снижается на 10%.",
+      "chain": "lean_gas",
+      "component": 0.2,
+      "flow": -0.1,
+      "disturbance_type": "Ступенчатое",
+      "start_time": 10.0,
+      "simulation_duration": 100.0,
+      "effect_duration": 10.0,
+      "time_constant": 10.0,
+      "delay": 2.0,
+      "controller": null
+    },
+    {
+      "name": "Слабое длительное возмущение",
+      "description": "Увеличение состава на 3% в течение 40 секунд.",
+      "chain": "rich_absorbent",
+      "component": 0.03,
+      "flow": null,
+      "disturbance_type": "Временное прямоугольное",
+      "start_time": 10.0,
+      "simulation_duration": 100.0,
+      "effect_duration": 40.0,
+      "time_constant": 10.0,
+      "delay": 2.0,
+      "controller": null
+    },
+    {
+      "name": "Кратковременный выброс",
+      "description": "Импульсное увеличение состава газа на 50% длительностью 6 секунд.",
+      "chain": "lean_gas",
+      "component": 0.5,
+      "flow": null,
+      "disturbance_type": "Импульсное",
+      "start_time": 10.0,
+      "simulation_duration": 80.0,
+      "effect_duration": 6.0,
+      "time_constant": 10.0,
+      "delay": 2.0,
+      "controller": null
+    },
+    {
+      "name": "Неверно настроенный регулятор",
+      "description": "Агрессивный PI-регулятор демонстрирует колебательную реакцию.",
+      "chain": "lean_gas",
+      "component": null,
+      "flow": 0.2,
+      "disturbance_type": "Ступенчатое",
+      "start_time": 10.0,
+      "simulation_duration": 100.0,
+      "effect_duration": 10.0,
+      "time_constant": 10.0,
+      "delay": 2.0,
+      "controller": {
+        "type": "PI",
+        "gain": 6.0,
+        "integral_time": 2.0,
+        "derivative_time": 0.0,
+        "control_limit": 100.0
+      }
+    }
+  ]
+}

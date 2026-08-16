@@ -105,6 +105,31 @@ class PredictionTests(unittest.TestCase):
         self.assertEqual(evaluation["score"], 4)
         self.assertEqual(evaluation["total"], 4)
 
+    def test_prediction_uses_scenario_tolerance(self):
+        outcome = {
+            "baseline": 10.0,
+            "disturbed_value": 12.0,
+            "steady_value": 10.0,
+            "open_duration": 20.0,
+            "controlled_duration": 12.0,
+            "controller_enabled": True,
+            "correction": "Да",
+        }
+        prediction = {
+            "direction": "Увеличится",
+            "steady": 10.8,
+            "fastest": "С регулятором",
+            "correction": "Да",
+        }
+
+        evaluation = evaluate_prediction(
+            prediction,
+            outcome,
+            steady_tolerance_percent=10.0,
+        )
+
+        self.assertEqual(evaluation["score"], 4)
+
 
 class ProtocolTests(unittest.TestCase):
     def test_protocol_contains_parameters_and_results(self):

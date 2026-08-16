@@ -18,11 +18,11 @@ from laboratory import (
     CORRECTION_OPTIONS,
     DIRECTION_OPTIONS,
     FASTEST_OPTIONS,
-    SCENARIOS,
-    SCENARIOS_BY_NAME,
     evaluate_prediction,
 )
 from model_dialog import ModelParametersDialog
+from scenario_editor import ScenarioEditorDialog
+from scenario_store import ScenarioStore
 from simulation import LEAN_GAS, RICH_ABSORBENT, run_simulation
 from validation import parse_fraction, parse_nonnegative_number, parse_positive_number
 
@@ -70,6 +70,10 @@ class AbsorptionApp(ttk.Frame):
         self.chain = LEAN_GAS
         self.model_values = DEFAULT_MODEL_VALUES.copy()
         self.model_dialog = None
+        self.scenario_editor = None
+        self.scenario_store = ScenarioStore()
+        self.scenarios = self.scenario_store.scenarios
+        self.scenarios_by_name = {scenario["name"]: scenario for scenario in self.scenarios}
         self.pages = {}
         self.nav_buttons = {}
 
@@ -129,9 +133,14 @@ class AbsorptionApp(ttk.Frame):
         self.primary_chart_subtitle = tk.StringVar(value="Изменение относительно базового уровня")
         self.response_chart_title = tk.StringVar(value="Кривая разгона")
         self.status_text = tk.StringVar(value="Готово к расчёту")
-        self.selected_scenario = tk.StringVar(value=SCENARIOS[0]["name"])
-        self.scenario_description = tk.StringVar(value=SCENARIOS[0]["description"])
+        self.selected_scenario = tk.StringVar(value=self.scenarios[0]["name"])
+        self.scenario_description = tk.StringVar(value=self.scenarios[0]["description"])
         self.active_scenario = tk.StringVar(value="Сценарий ещё не применён.")
+        self.teacher_mode = tk.BooleanVar(value=False)
+        self.scenario_storage_status = tk.StringVar(
+            value=self.scenario_store.warning or "Пользовательские сценарии хранятся локально."
+        )
+        self.assignment_tolerance_percent = 5.0
         self.assignment_enabled = tk.BooleanVar(value=False)
         self.predicted_direction = tk.StringVar()
         self.predicted_steady = tk.StringVar()
@@ -149,6 +158,8 @@ class AbsorptionApp(ttk.Frame):
         self._configure_styles()
         self._build_layout()
         self._select_chain(LEAN_GAS)
+        if self.scenario_store.warning:
+            self._set_status(self.scenario_store.warning, error=True)
 
     def _configure_window(self):
         self.root.title("Анализ процесса абсорбции")
@@ -630,14 +641,14 @@ class AbsorptionApp(ttk.Frame):
         ttk.Label(scenario_card, text="Готовый сценарий", style="CardTitle.TLabel").grid(
             row=0, column=0, sticky="w", pady=(0, 10)
         )
-        scenario_box = ttk.Combobox(
+        self.scenario_box = ttk.Combobox(
             scenario_card,
             textvariable=self.selected_scenario,
-            values=tuple(scenario["name"] for scenario in SCENARIOS),
+            values=tuple(scenario["name"] for scenario in self.scenarios),
             state="readonly",
         )
-        scenario_box.grid(row=1, column=0, sticky="ew")
-        scenario_box.bind("<<ComboboxSelected>>", self._update_scenario_description)
+        self.scenario_box.grid(row=1, column=0, sticky="ew")
+        self.scenario_box.bind("<<ComboboxSelected>>", self._update_scenario_description)
         ttk.Label(
             scenario_card,
             textvariable=self.scenario_description,
@@ -656,6 +667,30 @@ class AbsorptionApp(ttk.Frame):
             style="Muted.TLabel",
             wraplength=330,
         ).grid(row=4, column=0, sticky="w", pady=(8, 0))
+
+        ttk.Separator(scenario_card).grid(row=5, column=0, sticky="ew", pady=14)
+        ttk.Checkbutton(
+            scenario_card,
+            text="Режим преподавателя",
+            variable=self.teacher_mode,
+            command=self._toggle_teacher_mode,
+        ).grid(row=6, column=0, sticky="w")
+        self.teacher_editor_button = ttk.Button(
+            scenario_card,
+            text="Открыть редактор сценариев",
+            command=self._open_scenario_editor,
+            style="Secondary.TButton",
+        )
+        self.teacher_editor_button.grid(row=7, column=0, sticky="ew", pady=(10, 0))
+        self.teacher_storage_label = ttk.Label(
+            scenario_card,
+            textvariable=self.scenario_storage_status,
+            style="Muted.TLabel",
+            wraplength=330,
+        )
+        self.teacher_storage_label.grid(row=8, column=0, sticky="w", pady=(8, 0))
+        self.teacher_editor_button.grid_remove()
+        self.teacher_storage_label.grid_remove()
 
         assignment = self._card(parent, 1, padding=(14, 12))
         ttk.Checkbutton(
@@ -807,11 +842,14 @@ class AbsorptionApp(ttk.Frame):
         return axis, canvas, toolbar
 
     def _update_scenario_description(self, _event=None):
-        scenario = SCENARIOS_BY_NAME[self.selected_scenario.get()]
+        scenario = self.scenarios_by_name[self.selected_scenario.get()]
         self.scenario_description.set(scenario["description"])
 
     def _apply_scenario(self):
-        scenario = SCENARIOS_BY_NAME[self.selected_scenario.get()]
+        scenario = self.scenarios_by_name[self.selected_scenario.get()]
+        self._apply_scenario_data(scenario)
+
+    def _apply_scenario_data(self, scenario):
         self._select_chain(scenario["chain"])
         self.component_enabled.set(scenario["component"] is not None)
         self.flow_enabled.set(scenario["flow"] is not None)
@@ -840,8 +878,12 @@ class AbsorptionApp(ttk.Frame):
             self.integral_time.set(self._format_number(controller["integral_time"]))
             self.derivative_time.set(self._format_number(controller["derivative_time"]))
             self.control_limit.set(self._format_number(controller["control_limit"]))
-            self.setpoint.set(self._format_number(self._current_baseline()))
+            setpoint = controller.get("setpoint")
+            self.setpoint.set(
+                self._format_number(self._current_baseline() if setpoint is None else setpoint)
+            )
 
+        self.assignment_tolerance_percent = scenario.get("steady_tolerance_percent", 5.0)
         self._update_input_states()
         self._clear_result_values()
         self.predicted_direction.set("")
@@ -853,6 +895,59 @@ class AbsorptionApp(ttk.Frame):
         self._draw_static_charts()
         self._show_page("scenarios")
         self._set_status("Сценарий применён — выполните расчёт")
+
+    def _toggle_teacher_mode(self):
+        if self.teacher_mode.get():
+            self.teacher_editor_button.grid()
+            self.teacher_storage_label.grid()
+            self._set_status("Режим преподавателя включён")
+        else:
+            self.teacher_editor_button.grid_remove()
+            self.teacher_storage_label.grid_remove()
+            if self.scenario_editor is not None and self.scenario_editor.winfo_exists():
+                self.scenario_editor.destroy()
+                self.scenario_editor = None
+            self._set_status("Режим преподавателя выключен")
+
+    def _open_scenario_editor(self):
+        if self.scenario_editor is not None and self.scenario_editor.winfo_exists():
+            self.scenario_editor.lift()
+            self.scenario_editor.focus_force()
+            return
+        self.scenario_editor = ScenarioEditorDialog(
+            self.root,
+            self.scenario_store,
+            self._refresh_scenarios,
+            self._preview_scenario,
+            lambda: setattr(self, "scenario_editor", None),
+            BACKGROUND,
+        )
+
+    def _refresh_scenarios(self, selected_name=None, status=None):
+        self.scenarios = self.scenario_store.scenarios
+        self.scenarios_by_name = {scenario["name"]: scenario for scenario in self.scenarios}
+        names = tuple(self.scenarios_by_name)
+        self.scenario_box.configure(values=names)
+        if selected_name not in self.scenarios_by_name:
+            selected_name = names[0]
+        self.selected_scenario.set(selected_name)
+        self._update_scenario_description()
+        self.scenario_storage_status.set(
+            f"Пользовательских сценариев: {len(self.scenario_store.user_scenarios)}."
+        )
+        if status:
+            self._set_status(status)
+
+    def _preview_scenario(self, scenario):
+        if scenario["name"] in self.scenarios_by_name:
+            self.selected_scenario.set(scenario["name"])
+            self._update_scenario_description()
+        else:
+            self.scenario_description.set(scenario["description"])
+        self.assignment_enabled.set(False)
+        self._update_assignment_states()
+        self._apply_scenario_data(scenario)
+        self._calculate()
 
     def _update_assignment_states(self):
         enabled = self.assignment_enabled.get()
@@ -900,7 +995,11 @@ class AbsorptionApp(ttk.Frame):
     def _evaluate_assignment(self, prediction, outcome):
         if prediction is None:
             return
-        evaluation = evaluate_prediction(prediction, outcome)
+        evaluation = evaluate_prediction(
+            prediction,
+            outcome,
+            self.assignment_tolerance_percent,
+        )
         self.assignment_feedback.set(
             f"Результат: {evaluation['score']} из {evaluation['total']}.\n"
             + "\n".join(evaluation["lines"])
