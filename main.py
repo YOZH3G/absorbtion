@@ -69,6 +69,9 @@ class AbsorptionApp(ttk.Frame):
         self.component_value = tk.StringVar()
         self.flow_value = tk.StringVar()
         self.disturbance_type = tk.StringVar(value="Ступенчатое")
+        self.dynamics_expanded = tk.BooleanVar(value=False)
+        self.dynamics_heading = tk.StringVar()
+        self.dynamics_summary = tk.StringVar()
         self.start_time = tk.StringVar(value="10")
         self.simulation_duration = tk.StringVar(value="100")
         self.effect_duration = tk.StringVar(value="10")
@@ -129,6 +132,16 @@ class AbsorptionApp(ttk.Frame):
         style.map("SelectedSegment.TButton", background=[("active", ACCENT_ACTIVE)])
         style.configure("Toolbar.TButton", background="#FFFFFF", foreground=TEXT, bordercolor=BORDER, padding=(6, 4), font=("Segoe UI", 8))
         style.map("Toolbar.TButton", background=[("active", "#EEF2F6")])
+        style.configure(
+            "Disclosure.TButton",
+            background=CARD_BACKGROUND,
+            foreground=TEXT,
+            borderwidth=0,
+            padding=(0, 3),
+            font=("Segoe UI", 11, "bold"),
+            anchor="w",
+        )
+        style.map("Disclosure.TButton", background=[("active", "#EEF2F6")])
 
     def _build_layout(self):
         self.columnconfigure(0, minsize=470)
@@ -408,18 +421,30 @@ class AbsorptionApp(ttk.Frame):
         )
 
         ttk.Separator(card).grid(row=6, column=0, columnspan=3, sticky="ew", pady=(0, 12))
-        ttk.Label(card, text="Параметры времени и формы", style="CardTitle.TLabel").grid(
-            row=7, column=0, columnspan=3, sticky="w", pady=(0, 10)
+        ttk.Button(
+            card,
+            textvariable=self.dynamics_heading,
+            command=self._toggle_dynamics,
+            style="Disclosure.TButton",
+        ).grid(
+            row=7, column=0, columnspan=3, sticky="ew"
         )
+        self.dynamics_summary_label = ttk.Label(
+            card,
+            textvariable=self.dynamics_summary,
+            style="Muted.TLabel",
+            wraplength=400,
+        )
+        self.dynamics_summary_label.grid(row=8, column=0, columnspan=3, sticky="w", pady=(2, 4))
 
-        parameters = ttk.Frame(card, style="CardBody.TFrame")
-        parameters.grid(row=8, column=0, columnspan=3, sticky="ew")
-        parameters.columnconfigure((0, 1), weight=1)
+        self.dynamics_parameters = ttk.Frame(card, style="CardBody.TFrame")
+        self.dynamics_parameters.grid(row=9, column=0, columnspan=3, sticky="ew", pady=(8, 0))
+        self.dynamics_parameters.columnconfigure((0, 1), weight=1)
 
-        ttk.Label(parameters, text="Вид воздействия", style="Body.TLabel").grid(row=0, column=0, sticky="w")
-        ttk.Label(parameters, text="Начало, с", style="Body.TLabel").grid(row=0, column=1, sticky="w", padx=(10, 0))
+        ttk.Label(self.dynamics_parameters, text="Вид воздействия", style="Body.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(self.dynamics_parameters, text="Начало, с", style="Body.TLabel").grid(row=0, column=1, sticky="w", padx=(10, 0))
         self.disturbance_type_box = ttk.Combobox(
-            parameters,
+            self.dynamics_parameters,
             textvariable=self.disturbance_type,
             values=tuple(DISTURBANCE_TYPES),
             state="readonly",
@@ -427,35 +452,48 @@ class AbsorptionApp(ttk.Frame):
         )
         self.disturbance_type_box.grid(row=1, column=0, sticky="ew", pady=(3, 9))
         self.disturbance_type_box.bind("<<ComboboxSelected>>", self._update_disturbance_type)
-        self.start_time_entry = ttk.Entry(parameters, textvariable=self.start_time)
+        self.start_time_entry = ttk.Entry(self.dynamics_parameters, textvariable=self.start_time)
         self.start_time_entry.grid(row=1, column=1, sticky="ew", padx=(10, 0), pady=(3, 9))
 
-        ttk.Label(parameters, text="Длительность моделирования, с", style="Body.TLabel", wraplength=190).grid(row=2, column=0, sticky="w")
-        ttk.Label(parameters, text="Длительность воздействия, с", style="Body.TLabel", wraplength=190).grid(row=2, column=1, sticky="w", padx=(10, 0))
-        self.simulation_duration_entry = ttk.Entry(parameters, textvariable=self.simulation_duration)
+        ttk.Label(self.dynamics_parameters, text="Длительность моделирования, с", style="Body.TLabel", wraplength=190).grid(row=2, column=0, sticky="w")
+        ttk.Label(self.dynamics_parameters, text="Длительность воздействия, с", style="Body.TLabel", wraplength=190).grid(row=2, column=1, sticky="w", padx=(10, 0))
+        self.simulation_duration_entry = ttk.Entry(self.dynamics_parameters, textvariable=self.simulation_duration)
         self.simulation_duration_entry.grid(row=3, column=0, sticky="ew", pady=(3, 9))
-        self.effect_duration_entry = ttk.Entry(parameters, textvariable=self.effect_duration)
+        self.effect_duration_entry = ttk.Entry(self.dynamics_parameters, textvariable=self.effect_duration)
         self.effect_duration_entry.grid(row=3, column=1, sticky="ew", padx=(10, 0), pady=(3, 9))
 
-        ttk.Label(parameters, text="Постоянная времени T, с", style="Body.TLabel").grid(row=4, column=0, sticky="w")
-        ttk.Label(parameters, text="Запаздывание L, с", style="Body.TLabel").grid(row=4, column=1, sticky="w", padx=(10, 0))
-        self.time_constant_entry = ttk.Entry(parameters, textvariable=self.time_constant)
+        ttk.Label(self.dynamics_parameters, text="Постоянная времени T, с", style="Body.TLabel").grid(row=4, column=0, sticky="w")
+        ttk.Label(self.dynamics_parameters, text="Запаздывание L, с", style="Body.TLabel").grid(row=4, column=1, sticky="w", padx=(10, 0))
+        self.time_constant_entry = ttk.Entry(self.dynamics_parameters, textvariable=self.time_constant)
         self.time_constant_entry.grid(row=5, column=0, sticky="ew", pady=(3, 0))
-        self.delay_entry = ttk.Entry(parameters, textvariable=self.delay)
+        self.delay_entry = ttk.Entry(self.dynamics_parameters, textvariable=self.delay)
         self.delay_entry.grid(row=5, column=1, sticky="ew", padx=(10, 0), pady=(3, 0))
 
-        ttk.Label(card, textvariable=self.dynamics_error, style="Error.TLabel", wraplength=320).grid(
-            row=9, column=0, columnspan=3, sticky="w", pady=(4, 8)
+        self.dynamics_error_label = ttk.Label(
+            card,
+            textvariable=self.dynamics_error,
+            style="Error.TLabel",
+            wraplength=400,
         )
+        self.dynamics_error_label.grid(row=10, column=0, columnspan=3, sticky="w", pady=(4, 8))
 
         actions = ttk.Frame(card, style="CardBody.TFrame")
-        actions.grid(row=10, column=0, columnspan=3, sticky="ew")
+        actions.grid(row=11, column=0, columnspan=3, sticky="ew", pady=(8, 0))
         actions.columnconfigure((0, 1), weight=1)
         self.calculate_button = ttk.Button(actions, text="Рассчитать", command=self._calculate, style="Primary.TButton", state="disabled")
         self.calculate_button.grid(row=0, column=0, sticky="ew", padx=(0, 6))
         ttk.Button(actions, text="Сбросить", command=self._reset, style="Secondary.TButton").grid(row=0, column=1, sticky="ew", padx=(6, 0))
         card.columnconfigure(0, weight=1)
+        for variable in (
+            self.disturbance_type,
+            self.start_time,
+            self.simulation_duration,
+            self.time_constant,
+            self.delay,
+        ):
+            variable.trace_add("write", self._update_dynamics_summary)
         self._update_disturbance_type()
+        self._set_dynamics_expanded(False)
 
     def _build_result_card(self, parent):
         card = self._card(parent, 2)
@@ -538,9 +576,36 @@ class AbsorptionApp(ttk.Frame):
         self.calculate_button.configure(state="normal" if enabled else "disabled")
         self._clear_errors()
 
+    def _toggle_dynamics(self):
+        self._set_dynamics_expanded(not self.dynamics_expanded.get())
+
+    def _set_dynamics_expanded(self, expanded):
+        self.dynamics_expanded.set(expanded)
+        self.dynamics_heading.set(
+            f"{'▼' if expanded else '▶'} Параметры времени и формы"
+        )
+        if expanded:
+            self.dynamics_summary_label.grid_remove()
+            self.dynamics_parameters.grid()
+            self.dynamics_error_label.grid()
+        else:
+            self.dynamics_parameters.grid_remove()
+            self.dynamics_error_label.grid_remove()
+            self.dynamics_summary_label.grid()
+        self._update_dynamics_summary()
+
+    def _update_dynamics_summary(self, *_):
+        self.dynamics_summary.set(
+            f"{self.disturbance_type.get()} · "
+            f"t₀={self.start_time.get() or '—'} с · "
+            f"T={self.time_constant.get() or '—'} с · "
+            f"L={self.delay.get() or '—'} с"
+        )
+
     def _update_disturbance_type(self, _event=None):
         state = "disabled" if DISTURBANCE_TYPES[self.disturbance_type.get()] == STEP else "normal"
         self.effect_duration_entry.configure(state=state)
+        self._update_dynamics_summary()
 
     @staticmethod
     def _set_entry_state(entry, enabled, value):
@@ -589,6 +654,7 @@ class AbsorptionApp(ttk.Frame):
             except ValueError as error:
                 entry.configure(style="Error.TEntry")
                 self.dynamics_error.set(f"{label}: {error}")
+                self._set_dynamics_expanded(True)
                 raise
 
         kind = DISTURBANCE_TYPES[self.disturbance_type.get()]
@@ -600,6 +666,7 @@ class AbsorptionApp(ttk.Frame):
             except ValueError as error:
                 self.effect_duration_entry.configure(style="Error.TEntry")
                 self.dynamics_error.set(f"Длительность воздействия: {error}")
+                self._set_dynamics_expanded(True)
                 raise
 
         start_time = parsed["Начало воздействия"]
@@ -608,6 +675,7 @@ class AbsorptionApp(ttk.Frame):
             self.start_time_entry.configure(style="Error.TEntry")
             self.simulation_duration_entry.configure(style="Error.TEntry")
             self.dynamics_error.set("Начало воздействия должно быть раньше окончания моделирования.")
+            self._set_dynamics_expanded(True)
             raise ValueError(self.dynamics_error.get())
 
         return {
