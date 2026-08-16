@@ -1,5 +1,5 @@
 import tkinter as tk
-from tkinter import filedialog, messagebox, simpledialog, ttk
+from tkinter import filedialog, messagebox, ttk
 
 import numpy as np
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
@@ -15,7 +15,16 @@ from calculations import (
     tune_controller_parameters,
 )
 from comparison import MAX_COMPARISON_RUNS, build_comparison_run, write_comparison_csv
-from exporting import build_protocol, save_graphs, write_csv, write_protocol
+from exporting import (
+    build_protocol,
+    save_graphs,
+    write_comparison_html_report,
+    write_comparison_pdf_report,
+    write_csv,
+    write_html_report,
+    write_pdf_report,
+    write_protocol,
+)
 from laboratory import (
     CORRECTION_OPTIONS,
     DIRECTION_OPTIONS,
@@ -159,6 +168,15 @@ class AbsorptionApp(ttk.Frame):
             value=self._scenario_storage_text()
         )
         self.assignment_tolerance_percent = 5.0
+        self.current_lesson = self.scenarios[0]["lesson"]
+        self.assignment_attempts = 0
+        self.assignment_evaluation = None
+        self.learning_mode = tk.BooleanVar(value=False)
+        self.learning_step = 1
+        self.lesson_summary = tk.StringVar()
+        self.learning_route = tk.StringVar()
+        self.student_name = tk.StringVar()
+        self.student_conclusion = tk.StringVar()
         self.assignment_enabled = tk.BooleanVar(value=False)
         self.predicted_direction = tk.StringVar()
         self.predicted_steady = tk.StringVar()
@@ -170,6 +188,7 @@ class AbsorptionApp(ttk.Frame):
         self.export_summary = tk.StringVar(value="Сначала выполните расчёт.")
         self.export_buttons = []
         self.last_calculation = None
+        self.last_prediction = None
         self.controller_signal_axis = None
         self.comparison_runs = []
         self.comparison_counter = 0
@@ -183,6 +202,8 @@ class AbsorptionApp(ttk.Frame):
         self._configure_window()
         self._configure_styles()
         self._build_layout()
+        self._update_lesson_summary()
+        self._update_learning_route()
         self._select_chain(LEAN_GAS)
         if self.scenario_store.warning:
             self._set_status(self.scenario_store.warning, error=True)
@@ -960,6 +981,18 @@ class AbsorptionApp(ttk.Frame):
             command=self._open_comparison_session,
             style="Secondary.TButton",
         ).grid(row=4, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        ttk.Button(
+            actions,
+            text="Отчёт HTML (все)",
+            command=self._save_comparison_html_report,
+            style="Secondary.TButton",
+        ).grid(row=5, column=0, sticky="ew", padx=(0, 4), pady=(8, 0))
+        ttk.Button(
+            actions,
+            text="Отчёт PDF (все)",
+            command=self._save_comparison_pdf_report,
+            style="Secondary.TButton",
+        ).grid(row=5, column=1, sticky="ew", padx=(4, 0), pady=(8, 0))
 
         note = self._card(parent, 1)
         ttk.Label(note, text="Как сравнивать", style="CardTitle.TLabel").grid(
@@ -1040,7 +1073,27 @@ class AbsorptionApp(ttk.Frame):
         self.teacher_storage_label.grid_remove()
         self.restore_scenarios_button.grid_remove()
 
-        assignment = self._card(parent, 1, padding=(14, 12))
+        lesson_card = self._card(parent, 1, padding=(14, 12))
+        ttk.Label(lesson_card, text="Учебное задание", style="CardTitle.TLabel").grid(
+            row=0, column=0, sticky="w", pady=(0, 8)
+        )
+        ttk.Label(
+            lesson_card, textvariable=self.lesson_summary, style="Body.TLabel",
+            justify="left", wraplength=330,
+        ).grid(row=1, column=0, sticky="w")
+        ttk.Checkbutton(
+            lesson_card, text="Пошаговый учебный режим", variable=self.learning_mode,
+            command=self._update_learning_route,
+        ).grid(row=2, column=0, sticky="w", pady=(10, 4))
+        ttk.Label(lesson_card, textvariable=self.learning_route, style="Muted.TLabel", wraplength=330).grid(
+            row=3, column=0, sticky="w"
+        )
+        ttk.Button(
+            lesson_card, text="Следующий шаг", command=self._advance_learning_step,
+            style="Secondary.TButton",
+        ).grid(row=4, column=0, sticky="ew", pady=(8, 0))
+
+        assignment = self._card(parent, 2, padding=(14, 12))
         ttk.Checkbutton(
             assignment,
             text="Режим задания: сначала сделать прогноз",
@@ -1080,9 +1133,23 @@ class AbsorptionApp(ttk.Frame):
         )
         self.steady_prediction.grid(row=row, column=1, sticky="e", padx=(8, 0), pady=4)
         self.prediction_widgets.append(self.steady_prediction)
+        row += 1
+        ttk.Label(assignment, text="Студент", style="Body.TLabel").grid(
+            row=row, column=0, sticky="w", pady=4
+        )
+        self.student_name_entry = ttk.Entry(assignment, textvariable=self.student_name, state="disabled", width=22)
+        self.student_name_entry.grid(row=row, column=1, sticky="e", padx=(8, 0), pady=4)
+        self.prediction_widgets.append(self.student_name_entry)
+        row += 1
+        ttk.Label(assignment, text="Краткий вывод", style="Body.TLabel").grid(
+            row=row, column=0, sticky="w", pady=4
+        )
+        self.student_conclusion_entry = ttk.Entry(assignment, textvariable=self.student_conclusion, state="disabled", width=22)
+        self.student_conclusion_entry.grid(row=row, column=1, sticky="e", padx=(8, 0), pady=4)
+        self.prediction_widgets.append(self.student_conclusion_entry)
         assignment.columnconfigure(0, weight=1)
 
-        feedback = self._card(parent, 2, padding=(14, 12))
+        feedback = self._card(parent, 3, padding=(14, 12))
         ttk.Label(feedback, text="Проверка прогноза", style="CardTitle.TLabel").grid(
             row=0, column=0, sticky="w", pady=(0, 8)
         )
@@ -1108,6 +1175,8 @@ class AbsorptionApp(ttk.Frame):
         actions = (
             ("Сохранить два графика PNG", self._export_graphs_png),
             ("Экспортировать точки CSV", self._export_csv),
+            ("Сохранить отчёт HTML", self._save_html_report),
+            ("Сохранить отчёт PDF", self._save_pdf_report),
             ("Копировать параметры и результаты", self._copy_protocol),
             ("Сохранить протокол TXT", self._save_protocol),
         )
@@ -1198,6 +1267,12 @@ class AbsorptionApp(ttk.Frame):
         self._apply_scenario_data(scenario)
 
     def _apply_scenario_data(self, scenario):
+        self.current_lesson = scenario["lesson"]
+        self.assignment_attempts = 0
+        self.assignment_evaluation = None
+        self.learning_step = 1
+        self._update_lesson_summary()
+        self._update_learning_route()
         self._select_chain(scenario["chain"])
         self.component_enabled.set(scenario["component"] is not None)
         self.flow_enabled.set(scenario["flow"] is not None)
@@ -1353,9 +1428,47 @@ class AbsorptionApp(ttk.Frame):
         )
         self.calculate_button_text.set("Проверить прогноз" if enabled else "Рассчитать")
 
+    def _update_lesson_summary(self):
+        lesson = self.current_lesson
+        questions = lesson["questions"]
+        question_text = "" if not questions else "\nВопросы:\n" + "\n".join(f"• {item}" for item in questions)
+        self.lesson_summary.set(
+            f"{lesson['task']}\n\n{lesson['guidance']}"
+            f"{question_text}\n\nПопыток для прогноза: {lesson['attempt_limit']}."
+        )
+
+    def _update_learning_route(self):
+        steps = (
+            "Выберите и примените сценарий",
+            "Сформулируйте прогноз",
+            "Выполните расчёт",
+            "Сравните прогноз с результатом",
+            "Измените настройки регулятора",
+            "Сделайте вывод",
+        )
+        if not self.learning_mode.get():
+            self.learning_route.set("Включите режим, чтобы идти по этапам лабораторной работы.")
+            return
+        self.learning_route.set(
+            " → ".join(
+                f"[{index + 1}] {text}" if index + 1 == self.learning_step else text
+                for index, text in enumerate(steps)
+            )
+        )
+
+    def _advance_learning_step(self):
+        if not self.learning_mode.get():
+            self.learning_mode.set(True)
+        self.learning_step = min(6, self.learning_step + 1)
+        self._update_learning_route()
+
     def _read_prediction(self):
         if not self.assignment_enabled.get():
             return None
+        if self.assignment_attempts >= self.current_lesson["attempt_limit"]:
+            self.assignment_feedback.set("Лимит попыток для этого задания исчерпан.")
+            self._show_page("scenarios")
+            raise ValueError("Лимит попыток исчерпан.")
         self.steady_prediction.configure(style="TEntry")
         if not all((
             self.predicted_direction.get(),
@@ -1387,11 +1500,20 @@ class AbsorptionApp(ttk.Frame):
             prediction,
             outcome,
             self.assignment_tolerance_percent,
+            lesson=self.current_lesson,
+            controller=self.last_calculation["controller"] if self.last_calculation is not None else None,
         )
+        self.assignment_attempts += 1
+        self.assignment_evaluation = evaluation
+        remaining = self.current_lesson["attempt_limit"] - self.assignment_attempts
         self.assignment_feedback.set(
             f"Результат: {evaluation['score']} из {evaluation['total']}.\n"
             + "\n".join(evaluation["lines"])
+            + f"\nОсталось попыток: {remaining}."
         )
+        if self.learning_mode.get():
+            self.learning_step = max(self.learning_step, 4)
+            self._update_learning_route()
 
     def _add_current_to_comparison(self):
         if self.last_calculation is None:
@@ -1514,18 +1636,40 @@ class AbsorptionApp(ttk.Frame):
             return
         self._set_status(f"Сравнение сохранено: {path.name}")
 
+    def _save_comparison_html_report(self):
+        self._save_comparison_report("html")
+
+    def _save_comparison_pdf_report(self):
+        self._save_comparison_report("pdf")
+
+    def _save_comparison_report(self, format_name):
+        if not self.comparison_runs:
+            self._set_status("Нет закреплённых опытов для отчёта", error=True)
+            return
+        selected = filedialog.asksaveasfilename(
+            parent=self.root,
+            title="Сохранить отчёт по сравнению",
+            defaultextension=f".{format_name}",
+            filetypes=((format_name.upper(), f"*.{format_name}"),),
+            initialfile=f"absorption_comparison_report.{format_name}",
+        )
+        if not selected:
+            return
+        writer = write_comparison_html_report if format_name == "html" else write_comparison_pdf_report
+        try:
+            path = writer(selected, self.comparison_runs)
+        except (OSError, ValueError) as error:
+            self._set_status(f"Не удалось сохранить отчёт сравнения: {error}", error=True)
+            return
+        self._set_status(f"Отчёт по всем закреплённым опытам сохранён: {path.name}")
+
     def _rename_comparison_run(self):
         selected = self._selected_comparison_runs()
         if len(selected) != 1:
             self._set_status("Выберите один опыт для переименования", error=True)
             return
         run = selected[0]
-        name = simpledialog.askstring(
-            "Переименовать опыт",
-            "Название опыта:",
-            initialvalue=run["name"],
-            parent=self.root,
-        )
+        name = self._ask_comparison_run_name(run["name"])
         if name is None:
             return
         name = name.strip()
@@ -1534,6 +1678,49 @@ class AbsorptionApp(ttk.Frame):
             return
         run["name"] = name
         self._refresh_comparison_table((run["id"],))
+
+    def _ask_comparison_run_name(self, initial_name):
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Переименовать опыт")
+        dialog.configure(background=BACKGROUND)
+        dialog.resizable(False, False)
+        dialog.transient(self.root)
+        dialog.grab_set()
+        dialog.geometry("460x150")
+
+        name = tk.StringVar(value=initial_name)
+        result = {"value": None}
+        content = ttk.Frame(dialog, style="App.TFrame", padding=20)
+        content.pack(fill="both", expand=True)
+        ttk.Label(content, text="Название опыта", style="CardTitle.TLabel").pack(anchor="w")
+        entry = ttk.Entry(content, textvariable=name, width=48)
+        entry.pack(fill="x", pady=(8, 16))
+
+        actions = ttk.Frame(content, style="App.TFrame")
+        actions.pack(fill="x")
+        actions.columnconfigure(0, weight=1)
+
+        def apply_name():
+            result["value"] = name.get()
+            dialog.destroy()
+
+        ttk.Button(actions, text="Отмена", command=dialog.destroy, style="Secondary.TButton").grid(
+            row=0, column=1, padx=(0, 8)
+        )
+        ttk.Button(actions, text="Переименовать", command=apply_name, style="Primary.TButton").grid(
+            row=0, column=2
+        )
+        dialog.bind("<Return>", lambda _event: apply_name())
+        dialog.bind("<Escape>", lambda _event: dialog.destroy())
+        dialog.protocol("WM_DELETE_WINDOW", dialog.destroy)
+        dialog.update_idletasks()
+        x = self.root.winfo_rootx() + (self.root.winfo_width() - dialog.winfo_width()) // 2
+        y = self.root.winfo_rooty() + (self.root.winfo_height() - dialog.winfo_height()) // 2
+        dialog.geometry(f"+{max(0, x)}+{max(0, y)}")
+        entry.focus_set()
+        entry.select_range(0, "end")
+        self.root.wait_window(dialog)
+        return result["value"]
         self._draw_comparison()
         self._set_status("Название опыта изменено")
 
@@ -1691,7 +1878,7 @@ class AbsorptionApp(ttk.Frame):
                 label=run["name"],
             )
         if runs:
-            self.disturbance_axis.legend(loc="best", frameon=False, fontsize=8)
+            self._place_legend_above(self.disturbance_axis)
             self.disturbance_axis.margins(x=0.02, y=0.12)
         else:
             self.disturbance_axis.text(
@@ -1806,6 +1993,58 @@ class AbsorptionApp(ttk.Frame):
             return
         self.export_summary.set(f"Протокол сохранён: {path.name}.")
         self._set_status("Протокол сохранён")
+
+    def _save_html_report(self):
+        selected = filedialog.asksaveasfilename(
+            parent=self.root,
+            title="Сохранить отчёт лабораторной работы",
+            defaultextension=".html",
+            filetypes=(("HTML", "*.html"),),
+            initialfile="absorption_lab_report.html",
+        )
+        if not selected:
+            return
+        title = self.active_scenario.get().removeprefix("Применён: ").removesuffix(".")
+        try:
+            path = write_html_report(
+                selected, self.last_calculation, title, self.current_lesson,
+                self.assignment_evaluation, self.student_name.get(),
+                self.student_conclusion.get(),
+                (self.disturbance_axis.figure, self.response_axis.figure),
+                prediction=self.last_prediction,
+                comparison_runs=self.comparison_runs,
+            )
+        except OSError as error:
+            self._set_status(f"Не удалось сохранить HTML-отчёт: {error}", error=True)
+            return
+        self.export_summary.set(f"HTML-отчёт сохранён: {path.name}.")
+        self._set_status("HTML-отчёт сохранён")
+
+    def _save_pdf_report(self):
+        selected = filedialog.asksaveasfilename(
+            parent=self.root,
+            title="Сохранить отчёт лабораторной работы",
+            defaultextension=".pdf",
+            filetypes=(("PDF", "*.pdf"),),
+            initialfile="absorption_lab_report.pdf",
+        )
+        if not selected:
+            return
+        title = self.active_scenario.get().removeprefix("Применён: ").removesuffix(".")
+        try:
+            path = write_pdf_report(
+                selected, self.last_calculation, title, self.current_lesson,
+                self.assignment_evaluation, self.student_name.get(),
+                self.student_conclusion.get(),
+                (self.disturbance_axis.figure, self.response_axis.figure),
+                prediction=self.last_prediction,
+                comparison_runs=self.comparison_runs,
+            )
+        except OSError as error:
+            self._set_status(f"Не удалось сохранить PDF-отчёт: {error}", error=True)
+            return
+        self.export_summary.set(f"PDF-отчёт сохранён: {path.name}.")
+        self._set_status("PDF-отчёт сохранён")
 
     def _build_protocol_text(self):
         title = self.active_scenario.get() if self.active_scenario.get().startswith("Применён:") else "Свободный расчёт"
@@ -2176,6 +2415,7 @@ class AbsorptionApp(ttk.Frame):
             result["response_start"],
         )
         self.last_calculation = result
+        self.last_prediction = prediction
         self.add_comparison_button.configure(state="normal")
         for button in self.export_buttons:
             button.configure(state="normal")
@@ -2260,6 +2500,7 @@ class AbsorptionApp(ttk.Frame):
 
     def _clear_result_values(self):
         self.last_calculation = None
+        self.last_prediction = None
         if hasattr(self, "add_comparison_button"):
             self.add_comparison_button.configure(state="disabled")
         if hasattr(self, "export_buttons"):
@@ -2299,7 +2540,7 @@ class AbsorptionApp(ttk.Frame):
             linewidth=2,
             label="Исходный режим",
         )
-        self.response_axis.legend(loc="best", frameon=False, fontsize=8)
+        self._place_legend_above(self.response_axis)
         self.response_canvas.draw_idle()
         self._charts_show_comparison = False
 
@@ -2366,7 +2607,7 @@ class AbsorptionApp(ttk.Frame):
         self.disturbance_axis.plot(time, combined_signal, color=CURVE_STYLES["Совместное воздействие"][0], linewidth=2.4, label="Совместно")
         self._annotate_timing(self.disturbance_axis, dynamics)
         self.disturbance_axis.margins(x=0.02, y=0.15)
-        self.disturbance_axis.legend(loc="best", frameon=False, fontsize=8, ncol=2)
+        self._place_legend_above(self.disturbance_axis)
         self._enable_legend_toggles(self.disturbance_axis, self.disturbance_canvas)
         self.disturbance_canvas.draw_idle()
 
@@ -2385,7 +2626,7 @@ class AbsorptionApp(ttk.Frame):
             )
         self._annotate_transition(self.response_axis, dynamics, metrics)
         self.response_axis.margins(x=0.02, y=0.12)
-        self.response_axis.legend(loc="best", frameon=False, fontsize=8, ncol=2)
+        self._place_legend_above(self.response_axis)
         self._enable_legend_toggles(self.response_axis, self.response_canvas)
         self.response_canvas.draw_idle()
 
@@ -2417,12 +2658,10 @@ class AbsorptionApp(ttk.Frame):
         self.controller_signal_axis.spines["top"].set_visible(False)
         self.controller_signal_axis.spines["right"].set_color(BORDER)
         self.disturbance_axis.margins(x=0.02, y=0.15)
-        self.disturbance_axis.legend(
+        self._place_legend_above(
+            self.disturbance_axis,
             [error_line, control_line],
             [error_line.get_label(), control_line.get_label()],
-            loc="best",
-            frameon=False,
-            fontsize=8,
         )
         self.disturbance_canvas.draw_idle()
 
@@ -2461,9 +2700,28 @@ class AbsorptionApp(ttk.Frame):
         )
         self._annotate_transition(self.response_axis, dynamics, metrics)
         self.response_axis.margins(x=0.02, y=0.12)
-        self.response_axis.legend(loc="best", frameon=False, fontsize=8, ncol=3)
+        self._place_legend_above(self.response_axis)
         self._enable_legend_toggles(self.response_axis, self.response_canvas)
         self.response_canvas.draw_idle()
+
+    @staticmethod
+    def _place_legend_above(axis, handles=None, labels=None):
+        if handles is None:
+            handles, labels = axis.get_legend_handles_labels()
+        if not handles:
+            return
+        axis.legend(
+            handles,
+            labels,
+            loc="lower center",
+            bbox_to_anchor=(0.5, 1.02),
+            frameon=False,
+            fontsize=8,
+            ncol=len(handles),
+            borderaxespad=0,
+            columnspacing=1.4,
+            handletextpad=0.6,
+        )
 
     @staticmethod
     def _enable_legend_toggles(axis, canvas):

@@ -51,6 +51,19 @@ class ScenarioEditorDialog(tk.Toplevel):
             "control_limit": tk.StringVar(),
             "setpoint": tk.StringVar(),
             "steady_tolerance_percent": tk.StringVar(),
+            "attempt_limit": tk.StringVar(),
+            "target_enabled": tk.BooleanVar(),
+            "target_type": tk.StringVar(),
+            "target_gain_min": tk.StringVar(),
+            "target_gain_max": tk.StringVar(),
+            "target_integral_min": tk.StringVar(),
+            "target_integral_max": tk.StringVar(),
+            "target_derivative_min": tk.StringVar(),
+            "target_derivative_max": tk.StringVar(),
+            "answer_direction": tk.StringVar(),
+            "answer_steady": tk.StringVar(),
+            "answer_fastest": tk.StringVar(),
+            "answer_correction": tk.StringVar(),
         }
         self._status = tk.StringVar()
         self._source = tk.StringVar()
@@ -60,6 +73,8 @@ class ScenarioEditorDialog(tk.Toplevel):
         self._loaded_values = None
         self._field_widgets = {}
         self._field_errors = {}
+        self._lesson_texts = {}
+        self._loaded_lesson_texts = {}
 
         self.title("Редактор лабораторных сценариев")
         self.geometry("1180x780")
@@ -208,12 +223,15 @@ class ScenarioEditorDialog(tk.Toplevel):
         general = ttk.Frame(notebook, style="CardBody.TFrame", padding=16)
         dynamics = ttk.Frame(notebook, style="CardBody.TFrame", padding=16)
         controller = ttk.Frame(notebook, style="CardBody.TFrame", padding=16)
+        lesson = ttk.Frame(notebook, style="CardBody.TFrame", padding=16)
         notebook.add(general, text="Сценарий")
         notebook.add(dynamics, text="Динамика")
         notebook.add(controller, text="Регулятор и задание")
+        notebook.add(lesson, text="Учебное задание")
         self._build_general_tab(general)
         self._build_dynamics_tab(dynamics)
         self._build_controller_tab(controller)
+        self._build_lesson_tab(lesson)
 
         ttk.Label(
             form,
@@ -348,6 +366,66 @@ class ScenarioEditorDialog(tk.Toplevel):
         ttk.Separator(tab).grid(row=7, column=0, columnspan=2, sticky="ew", pady=14)
         self._entry(tab, 8, "Допуск прогноза установившегося значения, %", "steady_tolerance_percent")
 
+    def _build_lesson_tab(self, tab):
+        tab.columnconfigure(1, weight=1)
+        self._text_field(tab, 0, "Формулировка задания", "task", height=3)
+        self._text_field(tab, 1, "Методические указания", "guidance", height=3)
+        self._text_field(tab, 2, "Вопросы студенту\n(один на строку)", "questions", height=3)
+        self._entry(tab, 3, "Количество попыток", "attempt_limit")
+        ttk.Separator(tab).grid(row=4, column=0, columnspan=3, sticky="ew", pady=12)
+        self._target_check = ttk.Checkbutton(
+            tab,
+            text="Оценивать выбранные настройки регулятора",
+            variable=self._variables["target_enabled"],
+            command=self._update_lesson_states,
+        )
+        self._target_check.grid(row=5, column=0, columnspan=3, sticky="w", pady=(0, 6))
+        self._normal_widgets.append(self._target_check)
+        self._target_type_box = self._combobox(
+            tab, 6, "Целевой тип регулятора", "target_type", CONTROLLER_TYPES
+        )
+        self._target_gain_entries = self._range_entries(tab, 7, "K: минимум / максимум", "target_gain_min", "target_gain_max")
+        self._target_integral_entries = self._range_entries(tab, 8, "Ti: минимум / максимум", "target_integral_min", "target_integral_max")
+        self._target_derivative_entries = self._range_entries(tab, 9, "Td: минимум / максимум", "target_derivative_min", "target_derivative_max")
+        ttk.Separator(tab).grid(row=10, column=0, columnspan=3, sticky="ew", pady=12)
+        ttk.Label(tab, text="Скрытые правильные ответы (необязательно)", style="CardTitle.TLabel").grid(
+            row=11, column=0, columnspan=3, sticky="w", pady=(0, 6)
+        )
+        self._optional_combobox(tab, 12, "Направление", "answer_direction", ("", "Увеличится", "Уменьшится", "Не изменится"))
+        self._entry(tab, 13, "Установившееся значение", "answer_steady")
+        self._optional_combobox(tab, 14, "Скорость реакции", "answer_fastest", ("", "Без регулятора", "С регулятором", "Одинаково", "Без сравнения"))
+        self._optional_combobox(tab, 15, "Действие регулятора", "answer_correction", ("", "Да", "Нет", "Регулятор выключен"))
+
+    def _text_field(self, parent, row, label, key, height):
+        ttk.Label(parent, text=label, style="Body.TLabel").grid(
+            row=row, column=0, sticky="nw", pady=6, padx=(0, 14)
+        )
+        text = tk.Text(parent, height=height, wrap="word", font=("Segoe UI", 10), relief="solid", borderwidth=1)
+        text.grid(row=row, column=1, columnspan=2, sticky="ew", pady=6)
+        text.bind("<KeyRelease>", self._mark_dirty, add="+")
+        text.bind("<<Paste>>", lambda _event: self.after_idle(self._mark_dirty), add="+")
+        self._normal_widgets.append(text)
+        self._lesson_texts[key] = text
+
+    def _range_entries(self, parent, row, label, minimum_key, maximum_key):
+        ttk.Label(parent, text=label, style="Body.TLabel").grid(
+            row=row, column=0, sticky="w", pady=6, padx=(0, 14)
+        )
+        host = ttk.Frame(parent, style="CardBody.TFrame")
+        host.grid(row=row, column=1, columnspan=2, sticky="ew", pady=6)
+        host.columnconfigure((0, 1), weight=1)
+        minimum = ttk.Entry(host, textvariable=self._variables[minimum_key])
+        minimum.grid(row=0, column=0, sticky="ew", padx=(0, 4))
+        maximum = ttk.Entry(host, textvariable=self._variables[maximum_key])
+        maximum.grid(row=0, column=1, sticky="ew", padx=(4, 0))
+        self._normal_widgets.extend((minimum, maximum))
+        self._field_widgets[minimum_key] = minimum
+        self._field_widgets[maximum_key] = maximum
+        return minimum, maximum
+
+    def _optional_combobox(self, parent, row, label, key, values):
+        return self._combobox(parent, row, label, key, values)
+
     def _entry(self, parent, row, label, key):
         ttk.Label(parent, text=label, style="Body.TLabel").grid(
             row=row, column=0, sticky="w", pady=6, padx=(0, 14)
@@ -438,8 +516,12 @@ class ScenarioEditorDialog(tk.Toplevel):
         self._load_scenario(scenario)
 
     def _load_scenario(self, scenario, original_name=None):
+        scenario = normalize_scenario(scenario)
         self._loading_form = True
         controller = scenario["controller"]
+        lesson = scenario["lesson"]
+        target = lesson["controller_target"] or {}
+        answers = lesson["hidden_answers"]
         values = {
             "name": scenario["name"],
             "description": scenario["description"],
@@ -462,6 +544,19 @@ class ScenarioEditorDialog(tk.Toplevel):
             "control_limit": "100" if controller is None else self._format_number(controller["control_limit"]),
             "setpoint": "" if controller is None else self._format_optional(controller.get("setpoint")),
             "steady_tolerance_percent": self._format_number(scenario.get("steady_tolerance_percent", 5.0)),
+            "attempt_limit": str(lesson["attempt_limit"]),
+            "target_enabled": bool(target),
+            "target_type": target.get("type", "PI"),
+            "target_gain_min": self._format_optional(target.get("gain_min")),
+            "target_gain_max": self._format_optional(target.get("gain_max")),
+            "target_integral_min": self._format_optional(target.get("integral_time_min")),
+            "target_integral_max": self._format_optional(target.get("integral_time_max")),
+            "target_derivative_min": self._format_optional(target.get("derivative_time_min")),
+            "target_derivative_max": self._format_optional(target.get("derivative_time_max")),
+            "answer_direction": answers.get("direction", ""),
+            "answer_steady": self._format_optional(answers.get("steady")),
+            "answer_fastest": answers.get("fastest", ""),
+            "answer_correction": answers.get("correction", ""),
         }
         for key, value in values.items():
             self._variables[key].set(value)
@@ -471,6 +566,16 @@ class ScenarioEditorDialog(tk.Toplevel):
         self._set_editable(not builtin)
         self._dirty = False
         self._loaded_values = values.copy()
+        lesson_values = {
+            "task": lesson["task"],
+            "guidance": lesson["guidance"],
+            "questions": "\n".join(lesson["questions"]),
+        }
+        for key, value in lesson_values.items():
+            text = self._lesson_texts[key]
+            text.delete("1.0", tk.END)
+            text.insert("1.0", value)
+        self._loaded_lesson_texts = lesson_values.copy()
         self._clear_field_errors()
         self._update_field_styles()
         self._source.set("Встроенный · только просмотр" if builtin else "Пользовательский · можно редактировать")
@@ -484,7 +589,12 @@ class ScenarioEditorDialog(tk.Toplevel):
         if self._loading_form or not self._editable:
             return
         current_values = {key: variable.get() for key, variable in self._variables.items()}
-        self._dirty = self._loaded_values is None or current_values != self._loaded_values
+        lesson_values = {key: text.get("1.0", "end-1c") for key, text in self._lesson_texts.items()}
+        self._dirty = (
+            self._loaded_values is None
+            or current_values != self._loaded_values
+            or lesson_values != self._loaded_lesson_texts
+        )
         self._update_field_styles()
         if not self._dirty:
             self._source.set("Пользовательский · можно редактировать")
@@ -600,6 +710,16 @@ class ScenarioEditorDialog(tk.Toplevel):
         self._derivative_entry.configure(
             state="normal" if controller_enabled and "D" in controller_type else "disabled"
         )
+        self._update_lesson_states()
+
+    def _update_lesson_states(self):
+        if not self._editable:
+            state = "disabled"
+        else:
+            state = "normal" if self._variables["target_enabled"].get() else "disabled"
+        self._target_type_box.configure(state="readonly" if state == "normal" else "disabled")
+        for entry in (*self._target_gain_entries, *self._target_integral_entries, *self._target_derivative_entries):
+            entry.configure(state=state)
 
     def _new_scenario(self):
         if not self._confirm_discard():
@@ -619,6 +739,7 @@ class ScenarioEditorDialog(tk.Toplevel):
             "delay": 2.0,
             "controller": None,
             "steady_tolerance_percent": 5.0,
+            "lesson": None,
         }
         self._listbox.selection_clear(0, tk.END)
         self._current_list_index = None
@@ -813,7 +934,44 @@ class ScenarioEditorDialog(tk.Toplevel):
             "delay": self._variables["delay"].get(),
             "controller": controller,
             "steady_tolerance_percent": self._variables["steady_tolerance_percent"].get(),
+            "lesson": self._collect_lesson(),
         })
+
+    def _collect_lesson(self):
+        answers = {}
+        answer_keys = {
+            "direction": "answer_direction",
+            "steady": "answer_steady",
+            "fastest": "answer_fastest",
+            "correction": "answer_correction",
+        }
+        for lesson_key, variable_key in answer_keys.items():
+            value = self._variables[variable_key].get().strip()
+            if value:
+                answers[lesson_key] = value
+        target = None
+        if self._variables["target_enabled"].get():
+            target = {"type": self._variables["target_type"].get()}
+            for source, destination in (
+                ("target_gain_min", "gain_min"), ("target_gain_max", "gain_max"),
+                ("target_integral_min", "integral_time_min"), ("target_integral_max", "integral_time_max"),
+                ("target_derivative_min", "derivative_time_min"), ("target_derivative_max", "derivative_time_max"),
+            ):
+                value = self._variables[source].get().strip()
+                if value:
+                    target[destination] = value
+        return {
+            "task": self._lesson_texts["task"].get("1.0", "end-1c"),
+            "guidance": self._lesson_texts["guidance"].get("1.0", "end-1c"),
+            "questions": [
+                question.strip()
+                for question in self._lesson_texts["questions"].get("1.0", "end-1c").splitlines()
+                if question.strip()
+            ],
+            "attempt_limit": self._variables["attempt_limit"].get(),
+            "hidden_answers": answers,
+            "controller_target": target,
+        }
 
     def _unique_name(self, base):
         existing = {scenario["name"] for scenario in self.store.scenarios}

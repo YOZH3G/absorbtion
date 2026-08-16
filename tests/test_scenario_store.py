@@ -21,6 +21,23 @@ class ScenarioValidationTests(unittest.TestCase):
 
         self.assertEqual(normalized["steady_tolerance_percent"], 7.5)
         self.assertIsNone(normalized["controller"])
+        self.assertEqual(normalized["lesson"]["attempt_limit"], 1)
+
+    def test_normalization_keeps_teacher_lesson_data(self):
+        scenario = custom_scenario()
+        scenario["lesson"] = {
+            "task": "Подберите PI-регулятор.",
+            "guidance": "Начните с малой пропорциональной части.",
+            "questions": ["Почему возникает перерегулирование?"],
+            "attempt_limit": 3,
+            "hidden_answers": {"direction": "Увеличится"},
+            "controller_target": {"type": "PI", "gain_min": 1, "gain_max": 3},
+        }
+
+        normalized = normalize_scenario(scenario)
+
+        self.assertEqual(normalized["lesson"]["attempt_limit"], 3)
+        self.assertEqual(normalized["lesson"]["questions"][0], "Почему возникает перерегулирование?")
 
     def test_requires_at_least_one_disturbance(self):
         scenario = custom_scenario()

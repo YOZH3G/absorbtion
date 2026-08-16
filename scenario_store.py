@@ -6,7 +6,7 @@ import shutil
 from pathlib import Path
 
 from calculations import CONTROLLER_TYPES
-from laboratory import SCENARIOS
+from laboratory import SCENARIOS, normalize_lesson
 from validation import MAX_FRACTION, MIN_FRACTION
 
 
@@ -250,6 +250,7 @@ def normalize_scenario(scenario):
     )
 
     controller = _normalize_controller(scenario.get("controller"))
+    lesson = normalize_lesson(scenario.get("lesson"))
     return {
         "name": name,
         "description": description,
@@ -264,6 +265,7 @@ def normalize_scenario(scenario):
         "delay": delay,
         "controller": controller,
         "steady_tolerance_percent": tolerance,
+        "lesson": lesson,
     }
 
 

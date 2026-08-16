@@ -5,7 +5,17 @@ from pathlib import Path
 from matplotlib.figure import Figure
 
 from calculations import STEP
-from exporting import build_protocol, save_graphs, write_csv, write_protocol
+from exporting import (
+    build_comparison_figures,
+    build_protocol,
+    save_graphs,
+    write_comparison_html_report,
+    write_comparison_pdf_report,
+    write_csv,
+    write_html_report,
+    write_pdf_report,
+    write_protocol,
+)
 from simulation import LEAN_GAS, run_simulation
 
 
@@ -76,6 +86,70 @@ class ExportTests(unittest.TestCase):
         self.assertEqual(response_path.name, "result_response.png")
         self.assertTrue(signal_exists)
         self.assertTrue(response_exists)
+
+    def test_html_report_contains_lesson_and_embedded_graphs(self):
+        figure = Figure()
+        figure.add_subplot(111).plot([0, 1], [0, 1])
+        lesson = {
+            "task": "Оцените реакцию объекта.",
+            "guidance": "Сначала сделайте прогноз.",
+            "questions": ["Как влияет T?"],
+        }
+        evaluation = {
+            "score": 4,
+            "total": 5,
+            "criteria": [{"label": "Направление", "passed": True, "points": 1, "maximum": 1}],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = write_html_report(
+                Path(directory) / "report.html", self.result, "Учебный сценарий",
+                lesson, evaluation, "Иванов", "Регулятор уменьшил отклонение.",
+                (figure,),
+                prediction={"direction": "Увеличится"},
+                comparison_runs=[{
+                    "name": "Опыт 1", "controller_type": "PI",
+                    "maximum_deviation": 0.02, "settling_duration": 12.0,
+                }],
+            )
+            text = path.read_text(encoding="utf-8")
+
+        self.assertIn("Иванов", text)
+        self.assertIn("Оцените реакцию объекта.", text)
+        self.assertIn("Прогноз студента", text)
+        self.assertIn("Опыт 1", text)
+        self.assertIn("data:image/png;base64", text)
+
+    def test_pdf_reports_and_comparison_report_include_all_runs(self):
+        figure = Figure()
+        figure.add_subplot(111).plot([0, 1], [0, 1])
+        runs = [
+            {
+                "name": "Опыт 1", "time": [0, 1], "response": [0.8, 0.82],
+                "controller_type": "PI", "maximum_deviation": 0.02,
+                "settling_duration": 10.0,
+            },
+            {
+                "name": "Опыт 2", "time": [0, 1], "response": [0.8, 0.79],
+                "controller_type": "—", "maximum_deviation": 0.01,
+                "settling_duration": None,
+            },
+        ]
+        lesson = {"task": "Проверьте отклик.", "guidance": "Сравните опыты.", "questions": []}
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            report_path = write_pdf_report(
+                directory / "lab.pdf", self.result, "Сценарий", lesson, None,
+                "Иванов", "Вывод", (figure,), comparison_runs=runs,
+            )
+            comparison_html = write_comparison_html_report(directory / "comparison.html", runs)
+            comparison_pdf = write_comparison_pdf_report(directory / "comparison.pdf", runs)
+            html_text = comparison_html.read_text(encoding="utf-8")
+
+            self.assertTrue(report_path.read_bytes().startswith(b"%PDF"))
+            self.assertTrue(comparison_pdf.read_bytes().startswith(b"%PDF"))
+            self.assertIn("Опыт 1", html_text)
+            self.assertIn("Опыт 2", html_text)
+            self.assertEqual(len(build_comparison_figures(runs)), 2)
 
 
 if __name__ == "__main__":

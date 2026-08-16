@@ -130,6 +130,45 @@ class PredictionTests(unittest.TestCase):
 
         self.assertEqual(evaluation["score"], 4)
 
+    def test_teacher_criteria_include_controller_settings(self):
+        outcome = {
+            "baseline": 10.0,
+            "disturbed_value": 12.0,
+            "steady_value": 10.0,
+            "open_duration": 20.0,
+            "controlled_duration": 12.0,
+            "controller_enabled": True,
+            "correction": "Да",
+        }
+        prediction = {
+            "direction": "Увеличится",
+            "steady": 10.0,
+            "fastest": "С регулятором",
+            "correction": "Да",
+        }
+        lesson = {
+            "attempt_limit": 2,
+            "controller_target": {
+                "type": "PI",
+                "gain_min": 1.5,
+                "gain_max": 2.5,
+                "integral_time_min": 15.0,
+                "integral_time_max": 25.0,
+            },
+        }
+        controller = {
+            "controller_type": "PI",
+            "controller_gain": 2.0,
+            "integral_time": 20.0,
+            "derivative_time": 0.0,
+        }
+
+        evaluation = evaluate_prediction(prediction, outcome, lesson=lesson, controller=controller)
+
+        self.assertEqual(evaluation["score"], 5)
+        self.assertEqual(evaluation["total"], 5)
+        self.assertTrue(evaluation["criteria"][-1]["passed"])
+
 
 class ProtocolTests(unittest.TestCase):
     def test_protocol_contains_parameters_and_results(self):
