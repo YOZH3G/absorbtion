@@ -1,6 +1,4 @@
-import csv
 import tkinter as tk
-from pathlib import Path
 from tkinter import filedialog, ttk
 
 import numpy as np
@@ -13,16 +11,9 @@ from calculations import (
     RAMP,
     RECTANGLE,
     STEP,
-    calculate_xna,
-    calculate_xog,
-    combine_fractions,
-    controller_response,
-    controller_steady_state,
-    disturbance_profile,
-    first_order_response,
-    transition_metrics,
     tune_controller_parameters,
 )
+from exporting import build_protocol, save_graphs, write_csv, write_protocol
 from laboratory import (
     CORRECTION_OPTIONS,
     DIRECTION_OPTIONS,
@@ -30,8 +21,9 @@ from laboratory import (
     SCENARIOS,
     SCENARIOS_BY_NAME,
     evaluate_prediction,
-    format_protocol,
 )
+from model_dialog import ModelParametersDialog
+from simulation import LEAN_GAS, RICH_ABSORBENT, run_simulation
 from validation import parse_fraction, parse_nonnegative_number, parse_positive_number
 
 
@@ -46,9 +38,6 @@ ERROR = "#B42318"
 SUCCESS = "#16A34A"
 SIDEBAR = "#10243E"
 SIDEBAR_MUTED = "#9AAAC0"
-
-LEAN_GAS = "lean_gas"
-RICH_ABSORBENT = "rich_absorbent"
 
 DISTURBANCE_TYPES = {
     "Ступенчатое": STEP,
@@ -367,155 +356,21 @@ class AbsorptionApp(ttk.Frame):
             self.model_dialog.focus_force()
             return
 
-        dialog = tk.Toplevel(self.root)
-        self.model_dialog = dialog
-        dialog.title("Параметры математической модели")
-        dialog.configure(background=BACKGROUND)
-        dialog.resizable(False, False)
-        dialog.transient(self.root)
-
-        content = ttk.Frame(dialog, style="App.TFrame", padding=20)
-        content.pack(fill="both", expand=True)
-        content.columnconfigure((0, 1), weight=1)
-
-        ttk.Label(content, text="Параметры математической модели", style="Header.TLabel").grid(
-            row=0, column=0, columnspan=2, sticky="w"
-        )
-        ttk.Label(
-            content,
-            text="Все изменения применяются одновременно. Допустимы конечные числа больше нуля.",
-            style="Status.TLabel",
-        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(4, 16))
-
-        variables = {
-            key: tk.StringVar(value=self._format_number(value))
-            for key, value in self.model_values.items()
-        }
-        errors = {key: tk.StringVar() for key in variables}
-        entries = {}
-
-        gas_specs = (
-            ("gg", "Расход газовой смеси", "Gг"),
-            ("xg", "Доля компонента в исходном газе", "Xг"),
-            ("xog_initial", "Начальная концентрация обеднённого газа", "Xог₀"),
-        )
-        absorbent_specs = (
-            ("gna", "Расход насыщенного абсорбента", "Gна"),
-            ("xa", "Состав исходного абсорбента", "Xа"),
-            ("xna_initial", "Начальная концентрация насыщенного абсорбента", "Xна₀"),
-        )
-
-        def build_parameter_group(column, title, specs):
-            group = ttk.Frame(content, style="Card.TFrame", padding=(16, 14))
-            group.grid(row=2, column=column, sticky="nsew", padx=(0, 7) if column == 0 else (7, 0))
-            group.columnconfigure(0, weight=1)
-            ttk.Label(group, text=title, style="CardTitle.TLabel").grid(
-                row=0, column=0, columnspan=3, sticky="w", pady=(0, 12)
-            )
-            for index, (key, label, symbol) in enumerate(specs):
-                row = 1 + index * 2
-                ttk.Label(group, text=label, style="Body.TLabel", wraplength=220).grid(row=row, column=0, sticky="w")
-                ttk.Label(group, text=symbol, style="Body.TLabel").grid(row=row, column=1, padx=(10, 8))
-                entry = ttk.Entry(group, textvariable=variables[key], width=11)
-                entry.grid(row=row, column=2, sticky="e")
-                entries[key] = entry
-                ttk.Label(group, textvariable=errors[key], style="Error.TLabel").grid(
-                    row=row + 1, column=0, columnspan=3, sticky="w", pady=(2, 7)
-                )
-
-        build_parameter_group(0, "Газовая часть", gas_specs)
-        build_parameter_group(1, "Абсорбент", absorbent_specs)
-
-        derived = ttk.Frame(content, style="Card.TFrame", padding=(16, 12))
-        derived.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(14, 0))
-        derived.columnconfigure((1, 3), weight=1)
-        ttk.Label(derived, text="Расчётные значения", style="CardTitle.TLabel").grid(
-            row=0, column=0, columnspan=4, sticky="w", pady=(0, 8)
-        )
-        gog_value = tk.StringVar(value="—")
-        ga_value = tk.StringVar(value="—")
-        ttk.Label(derived, text="Gог — расход обеднённого газа", style="Body.TLabel").grid(row=1, column=0, sticky="w")
-        ttk.Label(derived, textvariable=gog_value, style="ResultValue.TLabel").grid(row=1, column=1, sticky="w", padx=(8, 28))
-        ttk.Label(derived, text="Gа — расход абсорбента", style="Body.TLabel").grid(row=1, column=2, sticky="w")
-        ttk.Label(derived, textvariable=ga_value, style="ResultValue.TLabel").grid(row=1, column=3, sticky="w", padx=(8, 0))
-
-        actions = ttk.Frame(content, style="App.TFrame")
-        actions.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(18, 0))
-        actions.columnconfigure(1, weight=1)
-
-        parsed_values = None
-
-        def validate_values(*_):
-            nonlocal parsed_values
-            parsed = {}
-            valid = True
-            for key, variable in variables.items():
-                try:
-                    parsed[key] = parse_positive_number(variable.get())
-                    errors[key].set("")
-                    entries[key].configure(style="TEntry")
-                except ValueError as error:
-                    errors[key].set(str(error))
-                    entries[key].configure(style="Error.TEntry")
-                    valid = False
-
-            if valid:
-                gog = (parsed["gg"] * parsed["xg"]) / parsed["xog_initial"]
-                ga = (parsed["gna"] * parsed["xna_initial"]) / parsed["xa"]
-                gog_value.set(self._format_number(gog))
-                ga_value.set(self._format_number(ga))
-                parsed_values = parsed
-                apply_button.configure(state="normal")
-            else:
-                gog_value.set("—")
-                ga_value.set("—")
-                parsed_values = None
-                apply_button.configure(state="disabled")
-
-        def restore_defaults():
-            for key, value in DEFAULT_MODEL_VALUES.items():
-                variables[key].set(self._format_number(value))
-
-        def close_dialog():
-            if dialog.grab_current() is dialog:
-                dialog.grab_release()
-            self.model_dialog = None
-            dialog.destroy()
-
-        def apply_values():
-            validate_values()
-            if parsed_values is None:
-                return
-            self.model_values = parsed_values.copy()
+        def apply_values(values):
+            self.model_values = values
             self.setpoint.set(self._format_number(self._current_baseline()))
-            close_dialog()
             self._reset()
             self._set_status("Параметры модели обновлены")
 
-        ttk.Button(actions, text="По умолчанию", command=restore_defaults, style="Secondary.TButton").grid(
-            row=0, column=0, sticky="w"
+        self.model_dialog = ModelParametersDialog(
+            self.root,
+            self.model_values,
+            DEFAULT_MODEL_VALUES,
+            apply_values,
+            lambda: setattr(self, "model_dialog", None),
+            self._format_number,
+            BACKGROUND,
         )
-        ttk.Button(actions, text="Отмена", command=close_dialog, style="Secondary.TButton").grid(
-            row=0, column=2, padx=(8, 8)
-        )
-        apply_button = ttk.Button(actions, text="Применить", command=apply_values, style="Primary.TButton")
-        apply_button.grid(row=0, column=3)
-
-        for variable in variables.values():
-            variable.trace_add("write", validate_values)
-        validate_values()
-
-        dialog.protocol("WM_DELETE_WINDOW", close_dialog)
-        dialog.bind("<Escape>", lambda _event: close_dialog())
-        dialog.bind("<Return>", lambda _event: apply_values())
-        dialog.update_idletasks()
-        x = self.root.winfo_rootx() + (self.root.winfo_width() - dialog.winfo_reqwidth()) // 2
-        y = self.root.winfo_rooty() + (self.root.winfo_height() - dialog.winfo_reqheight()) // 2
-        dialog.geometry(f"+{max(x, 0)}+{max(y, 0)}")
-        dialog.grab_set()
-        dialog.lift()
-        dialog.focus_force()
-        entries["gg"].focus_set()
 
     def _build_disturbance_card(self, parent):
         card = self._card(parent, 1)
@@ -1061,13 +916,12 @@ class AbsorptionApp(ttk.Frame):
         )
         if not selected:
             return
-        base = Path(selected)
-        stem = base.with_suffix("")
-        signal_path = stem.with_name(f"{stem.name}_signals.png")
-        response_path = stem.with_name(f"{stem.name}_response.png")
         try:
-            self.disturbance_axis.figure.savefig(signal_path, dpi=160, bbox_inches="tight")
-            self.response_axis.figure.savefig(response_path, dpi=160, bbox_inches="tight")
+            signal_path, response_path = save_graphs(
+                self.disturbance_axis.figure,
+                self.response_axis.figure,
+                selected,
+            )
         except OSError as error:
             self._set_status(f"Не удалось сохранить PNG: {error}", error=True)
             return
@@ -1084,31 +938,12 @@ class AbsorptionApp(ttk.Frame):
         )
         if not selected:
             return
-        result = self.last_calculation
-        columns = [
-            ("Время, с", result["time"]),
-            ("Профиль воздействия", result["profile"]),
-            ("Цель: совместное воздействие", result["targets"]["Совместное воздействие"]),
-        ]
-        columns.extend(
-            (f"Отклик: {label}", values)
-            for label, values in result["responses"].items()
-        )
-        if result["controlled_response"] is not None:
-            columns.extend((
-                ("Регулируемый выход", result["controlled_response"]),
-                ("Ошибка e(t)", result["error"]),
-                ("Управляющее воздействие u(t)", result["control"]),
-            ))
         try:
-            with open(selected, "w", encoding="utf-8-sig", newline="") as file:
-                writer = csv.writer(file, delimiter=";")
-                writer.writerow(label for label, _values in columns)
-                writer.writerows(zip(*(values for _label, values in columns)))
+            path = write_csv(selected, self.last_calculation)
         except OSError as error:
             self._set_status(f"Не удалось сохранить CSV: {error}", error=True)
             return
-        self.export_summary.set(f"Точки сохранены: {Path(selected).name}.")
+        self.export_summary.set(f"Точки сохранены: {path.name}.")
         self._set_status("Точки экспортированы в CSV")
 
     def _copy_protocol(self):
@@ -1130,48 +965,16 @@ class AbsorptionApp(ttk.Frame):
         if not selected:
             return
         try:
-            Path(selected).write_text(self._build_protocol_text(), encoding="utf-8")
+            path = write_protocol(selected, self._build_protocol_text())
         except OSError as error:
             self._set_status(f"Не удалось сохранить протокол: {error}", error=True)
             return
-        self.export_summary.set(f"Протокол сохранён: {Path(selected).name}.")
+        self.export_summary.set(f"Протокол сохранён: {path.name}.")
         self._set_status("Протокол сохранён")
 
     def _build_protocol_text(self):
-        result = self.last_calculation
-        controller = result["controller"]
-        parameters = [
-            ("Цепь", "Обеднённый газ" if result["chain"] == LEAN_GAS else "Насыщенный абсорбент"),
-            ("Возмущение состава", f"{result['component_fraction'] * 100:+.1f}%"),
-            ("Возмущение расхода", f"{result['flow_fraction'] * 100:+.1f}%"),
-            ("Вид воздействия", result["disturbance_type"]),
-            ("Начало воздействия", f"{result['dynamics']['start_time']:g} с"),
-            ("Длительность моделирования", f"{result['dynamics']['simulation_duration']:g} с"),
-            ("Постоянная времени T", f"{result['dynamics']['time_constant']:g} с"),
-            ("Запаздывание L", f"{result['dynamics']['delay']:g} с"),
-            ("Режим", self.result_mode.get()),
-        ]
-        if controller is not None:
-            parameters.extend((
-                ("K", f"{controller['controller_gain']:g}"),
-                ("Ti", f"{controller['integral_time']:g} с" if "I" in controller["controller_type"] else "не используется"),
-                ("Td", f"{controller['derivative_time']:g} с" if "D" in controller["controller_type"] else "не используется"),
-                ("Ограничение |u|", f"{controller['control_limit']:g}"),
-                ("Задание", f"{controller['setpoint']:g}"),
-            ))
-        results = [
-            ("Базовое значение", self.baseline_result.get()),
-            ("Суммарная доля", self.disturbance_result.get()),
-            ("Расчётное значение", self.calculated_result.get()),
-            ("В конце моделирования", self.final_result.get()),
-            ("Установившееся значение", self.transition_values["steady"].get()),
-            ("Максимальное отклонение", self.transition_values["maximum_deviation"].get()),
-            ("Относительное отклонение", self.transition_values["relative_deviation"].get()),
-            (self.settling_time_label.get(), self.transition_values["settling_time"].get()),
-            ("Статическая ошибка", self.transition_values["static_error"].get()),
-        ]
         title = self.active_scenario.get() if self.active_scenario.get().startswith("Применён:") else "Свободный расчёт"
-        return format_protocol(title, parameters, results)
+        return build_protocol(self.last_calculation, title)
 
     def _select_chain(self, chain):
         self.chain = chain
@@ -1510,182 +1313,63 @@ class AbsorptionApp(ttk.Frame):
             self._set_status("Исправьте значение", error=True)
             return
 
-        combined_fraction = combine_fractions(component_fraction, flow_fraction)
-        if self.chain == LEAN_GAS:
-            baseline = self.model_values["xog_initial"]
-            gog = (
-                self.model_values["gg"]
-                * self.model_values["xg"]
-                / self.model_values["xog_initial"]
-            )
-            calculator = lambda component, flow: calculate_xog(
-                self.model_values["gg"], self.model_values["xg"], gog, component, flow
-            )
-        else:
-            baseline = self.model_values["xna_initial"]
-            ga = (
-                self.model_values["gna"]
-                * self.model_values["xna_initial"]
-                / self.model_values["xa"]
-            )
-            calculator = lambda component, flow: calculate_xna(
-                ga, self.model_values["gna"], self.model_values["xa"], component, flow
-            )
-
-        calculated = calculator(component_fraction, flow_fraction)
-        time = np.linspace(0.0, dynamics["simulation_duration"], 501)
-        profile = disturbance_profile(
-            time,
-            dynamics["kind"],
-            dynamics["start_time"],
-            dynamics["effect_duration"],
+        result = run_simulation(
+            self.chain,
+            self.model_values,
+            component_fraction,
+            flow_fraction,
+            dynamics,
+            controller,
         )
-        targets = {
-            "Исходный режим": np.full_like(time, baseline),
-            "Только состав": calculator(component_fraction * profile, 0.0),
-            "Только расход": calculator(0.0, flow_fraction * profile),
-            "Совместное воздействие": calculator(
-                component_fraction * profile,
-                flow_fraction * profile,
-            ),
-        }
-        responses = {
-            label: first_order_response(
-                time,
-                baseline,
-                target,
-                dynamics["time_constant"],
-                dynamics["delay"],
-            )
-            for label, target in targets.items()
-        }
-        open_metrics = transition_metrics(
-            time,
-            responses["Совместное воздействие"],
-            targets["Совместное воздействие"],
-            baseline,
-        )
-        controlled_response = None
-        error = None
-        control = None
+        result["disturbance_type"] = self.disturbance_type.get()
 
-        self.baseline_result.set(self._format_number(baseline))
-        self.disturbance_result.set(f"{self._format_number(combined_fraction)} ({combined_fraction * 100:+.1f}%)")
-        self.calculated_result.set(self._format_number(calculated))
+        self.baseline_result.set(self._format_number(result["baseline"]))
+        self.disturbance_result.set(
+            f"{self._format_number(result['combined_fraction'])} "
+            f"({result['combined_fraction'] * 100:+.1f}%)"
+        )
+        self.calculated_result.set(self._format_number(result["calculated"]))
         self._update_calculation_steps(
             component_fraction,
             flow_fraction,
-            combined_fraction,
-            baseline,
-            calculated,
+            result["combined_fraction"],
+            result["baseline"],
+            result["calculated"],
         )
         if controller is None:
-            final_response = responses["Совместное воздействие"]
-            metrics = open_metrics
-            self.result_mode.set("Без регулятора")
-            metric_response_start = dynamics["start_time"] + dynamics["delay"]
-            self._draw_disturbance(time, profile, component_fraction, flow_fraction)
-            self._draw_response(time, responses)
+            self._draw_disturbance(
+                result["time"],
+                result["profile"],
+                component_fraction,
+                flow_fraction,
+            )
+            self._draw_response(result["time"], result["responses"])
         else:
-            controlled_response, error, control = controller_response(
-                time,
-                baseline,
-                targets["Совместное воздействие"],
-                dynamics["time_constant"],
-                controller["controller_type"],
-                controller["controller_gain"],
-                controller["integral_time"],
-                controller["derivative_time"],
-                controller["control_limit"],
-                controller["setpoint"],
-                dynamics["delay"],
+            self._draw_controller_signals(
+                result["time"],
+                result["error"],
+                result["control"],
             )
-            final_response = controlled_response
-            steady_state = controller_steady_state(
-                targets["Совместное воздействие"][-1],
-                controller["setpoint"],
-                controller["controller_type"],
-                controller["controller_gain"],
-                controller["control_limit"],
-            )
-            setpoint_target = np.full_like(time, steady_state)
-            metrics = transition_metrics(
-                time,
-                controlled_response,
-                setpoint_target,
-                baseline,
-            )
-            metrics["static_error"] = controller["setpoint"] - steady_state
-            self.result_mode.set(f"С {controller['controller_type']}-регулятором")
-            metric_response_start = (
-                dynamics["delay"]
-                if controller["setpoint"] != baseline
-                else dynamics["start_time"] + dynamics["delay"]
-            )
-            self._draw_controller_signals(time, error, control)
             self._draw_control_comparison(
-                time,
-                responses["Совместное воздействие"],
-                controlled_response,
+                result["time"],
+                result["responses"]["Совместное воздействие"],
+                result["controlled_response"],
                 controller["setpoint"],
                 controller["controller_type"],
             )
 
-        self.final_result.set(self._format_number(final_response[-1]))
-        self._update_transition_metrics(metrics, dynamics, metric_response_start)
-        open_duration = (
-            None
-            if open_metrics["settling_time"] is None
-            else max(
-                0.0,
-                open_metrics["settling_time"] - dynamics["start_time"] - dynamics["delay"],
-            )
+        self.result_mode.set(result["result_mode"])
+        self.final_result.set(self._format_number(result["final_response"][-1]))
+        self._update_transition_metrics(
+            result["metrics"],
+            dynamics,
+            result["response_start"],
         )
-        controlled_duration = (
-            None
-            if controller is None or metrics["settling_time"] is None
-            else max(0.0, metrics["settling_time"] - metric_response_start)
-        )
-        correction = "Регулятор выключен"
-        if controller is not None:
-            correction_tolerance = max(abs(controller["setpoint"]) * 0.01, 1e-6)
-            correction = (
-                "Да"
-                if metrics["settling_time"] is not None
-                and abs(metrics["static_error"]) <= correction_tolerance
-                else "Нет"
-            )
-        self.last_calculation = {
-            "chain": self.chain,
-            "component_fraction": component_fraction,
-            "flow_fraction": flow_fraction,
-            "disturbance_type": self.disturbance_type.get(),
-            "dynamics": dynamics,
-            "controller": controller,
-            "time": time,
-            "profile": profile,
-            "targets": targets,
-            "responses": responses,
-            "controlled_response": controlled_response,
-            "error": error,
-            "control": control,
-            "metrics": metrics,
-        }
+        self.last_calculation = result
         for button in self.export_buttons:
             button.configure(state="normal")
         self.export_summary.set("Расчёт готов к экспорту.")
-        self._evaluate_assignment(
-            prediction,
-            {
-                "baseline": baseline,
-                "disturbed_value": calculated,
-                "steady_value": metrics["steady_state"],
-                "open_duration": open_duration,
-                "controlled_duration": controlled_duration,
-                "controller_enabled": controller is not None,
-                "correction": correction,
-            },
-        )
+        self._evaluate_assignment(prediction, result["prediction_outcome"])
         self._show_page("scenarios" if prediction is not None else "results")
         self._set_status("Расчёт выполнен")
 

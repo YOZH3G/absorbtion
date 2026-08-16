@@ -175,6 +175,26 @@ def controller_response(
     control = np.empty_like(time)
     response[0] = baseline
     integral = 0.0
+    steps = np.diff(time)
+    decays = np.exp(-steps / time_constant)
+    delayed_times = time[:-1] - delay
+    delayed_disturbance = np.interp(
+        delayed_times,
+        time,
+        disturbance_target,
+        left=baseline,
+        right=disturbance_target[-1],
+    )
+    delayed_control_indices = np.searchsorted(time, delayed_times, side="right") - 1
+    delayed_control_weights = np.zeros_like(delayed_times)
+    interpolated = (
+        (delayed_control_indices >= 0)
+        & (delayed_control_indices + 1 < time.size)
+    )
+    lower_indices = delayed_control_indices[interpolated]
+    delayed_control_weights[interpolated] = (
+        delayed_times[interpolated] - time[lower_indices]
+    ) / (time[lower_indices + 1] - time[lower_indices])
 
     def calculate_control(current_error, integral_value, derivative_value):
         proportional_term = current_error if "P" in controller_type else 0.0
@@ -182,14 +202,17 @@ def controller_response(
         derivative_term = derivative_time * derivative_value if uses_derivative else 0.0
         return controller_gain * (proportional_term + integral_term + derivative_term)
 
+    def clamp_control(value):
+        return min(control_limit, max(-control_limit, value))
+
     for index in range(1, time.size):
-        step = time[index] - time[index - 1]
+        step = steps[index - 1]
         error[index - 1] = setpoint - response[index - 1]
         derivative = (
             0.0
             if index == 1
             else -(response[index - 1] - response[index - 2])
-            / (time[index - 1] - time[index - 2])
+            / steps[index - 2]
         )
         candidate_integral = (
             integral + error[index - 1] * step
@@ -201,35 +224,30 @@ def controller_response(
             candidate_integral,
             derivative,
         )
-        saturated_control = float(np.clip(candidate_control, -control_limit, control_limit))
+        saturated_control = clamp_control(candidate_control)
         if uses_integral and (
             candidate_control == saturated_control
             or candidate_control * error[index - 1] < 0
         ):
             integral = candidate_integral
 
-        control[index - 1] = float(np.clip(
-            calculate_control(error[index - 1], integral, derivative),
-            -control_limit,
-            control_limit,
-        ))
-        delayed_time = time[index - 1] - delay
-        delayed_disturbance = np.interp(
-            delayed_time,
-            time,
-            disturbance_target,
-            left=baseline,
-            right=disturbance_target[-1],
+        control[index - 1] = clamp_control(
+            calculate_control(error[index - 1], integral, derivative)
         )
-        delayed_control = np.interp(
-            delayed_time,
-            time[:index],
-            control[:index],
-            left=0.0,
-            right=control[index - 1],
-        )
-        interval_target = delayed_disturbance + delayed_control
-        decay = np.exp(-step / time_constant)
+        delay_index = index - 1
+        lower_index = delayed_control_indices[delay_index]
+        if delayed_times[delay_index] < time[0]:
+            delayed_control = 0.0
+        elif lower_index >= index - 1:
+            delayed_control = control[index - 1]
+        else:
+            weight = delayed_control_weights[delay_index]
+            delayed_control = (
+                control[lower_index]
+                + weight * (control[lower_index + 1] - control[lower_index])
+            )
+        interval_target = delayed_disturbance[delay_index] + delayed_control
+        decay = decays[delay_index]
         response[index] = interval_target + (response[index - 1] - interval_target) * decay
 
     error[-1] = setpoint - response[-1]
@@ -238,11 +256,9 @@ def controller_response(
         if time.size == 1
         else -(response[-1] - response[-2]) / (time[-1] - time[-2])
     )
-    control[-1] = float(np.clip(
-        calculate_control(error[-1], integral, final_derivative),
-        -control_limit,
-        control_limit,
-    ))
+    control[-1] = clamp_control(
+        calculate_control(error[-1], integral, final_derivative)
+    )
     return response, error, control
 
 

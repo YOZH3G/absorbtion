@@ -332,6 +332,37 @@ class ControllerTypeTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.simulate("UNKNOWN")
 
+    def test_pid_matches_nonuniform_delay_reference(self):
+        time = np.array([0.0, 0.2, 0.7, 1.4, 2.5, 4.0, 6.0, 9.0])
+        target = np.where(time >= 0.7, 1.1, 0.8)
+
+        response, error, control = controller_response(
+            time,
+            0.8,
+            target,
+            2.3,
+            "PID",
+            1.7,
+            3.1,
+            0.4,
+            0.35,
+            0.8,
+            0.65,
+        )
+
+        np.testing.assert_allclose(response, [
+            0.8, 0.8, 0.8, 0.8, 0.9140418580530887, 0.9513181886296848,
+            0.8809031708104486, 0.8542955308366388,
+        ])
+        np.testing.assert_allclose(error, [
+            0.0, 0.0, 0.0, 0.0, -0.11404185805308864, -0.1513181886296847,
+            -0.08090317081044851, -0.05429553083663874,
+        ])
+        np.testing.assert_allclose(control, [
+            0.0, 0.0, 0.0, 0.0, -0.26436976185034183, -0.2741395238651876,
+            -0.2466930492009278, -0.21937010224326123,
+        ])
+
     def test_steady_state_depends_on_controller_components(self):
         p_steady = controller_steady_state(15.0, 10.0, "P", 2.0, 20.0)
         pi_steady = controller_steady_state(15.0, 10.0, "PI", 2.0, 20.0)
