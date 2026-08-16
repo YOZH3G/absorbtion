@@ -6,6 +6,8 @@ IMPULSE = "impulse"
 RECTANGLE = "rectangle"
 RAMP = "ramp"
 
+CONTROLLER_TYPES = ("P", "PI", "PID", "PD")
+
 
 def combine_fractions(first, second):
     """Return the combined relative change for two independent fractions."""
@@ -116,4 +118,232 @@ def transition_metrics(time, response, target, baseline, settling_band=0.05):
         "relative_deviation": relative_deviation,
         "settling_time": settling_time,
         "static_error": float(baseline - steady_state),
+    }
+
+
+def controller_response(
+    time,
+    baseline,
+    disturbance_target,
+    time_constant,
+    controller_type,
+    controller_gain,
+    integral_time,
+    derivative_time,
+    control_limit,
+    setpoint,
+    delay=0.0,
+):
+    """Simulate a first-order object controlled by a selected ideal controller."""
+    time = np.asarray(time, dtype=float)
+    disturbance_target = np.asarray(disturbance_target, dtype=float)
+    if time.ndim != 1 or disturbance_target.shape != time.shape or time.size == 0:
+        raise ValueError("Время и целевое значение должны быть непустыми одномерными массивами одинаковой длины.")
+    if np.any(np.diff(time) <= 0):
+        raise ValueError("Значения времени должны строго возрастать.")
+    if time_constant <= 0:
+        raise ValueError("Постоянная времени должна быть больше нуля.")
+    if controller_type not in CONTROLLER_TYPES:
+        raise ValueError(f"Неизвестный тип регулятора: {controller_type}")
+    if controller_gain < 0:
+        raise ValueError("Коэффициент K не может быть отрицательным.")
+    uses_integral = "I" in controller_type
+    uses_derivative = "D" in controller_type
+    if uses_integral and integral_time <= 0:
+        raise ValueError("Время интегрирования Ti должно быть больше нуля.")
+    if uses_derivative and derivative_time < 0:
+        raise ValueError("Время дифференцирования Td не может быть отрицательным.")
+    if control_limit <= 0:
+        raise ValueError("Ограничение управляющего воздействия должно быть больше нуля.")
+    if delay < 0:
+        raise ValueError("Запаздывание не может быть отрицательным.")
+    if not np.all(np.isfinite(disturbance_target)) or not np.all(
+        np.isfinite([
+            baseline,
+            controller_gain,
+            integral_time,
+            derivative_time,
+            control_limit,
+            setpoint,
+            delay,
+        ])
+    ):
+        raise ValueError("Параметры модели регулятора должны быть конечными числами.")
+
+    response = np.empty_like(time)
+    error = np.empty_like(time)
+    control = np.empty_like(time)
+    response[0] = baseline
+    integral = 0.0
+
+    def calculate_control(current_error, integral_value, derivative_value):
+        proportional_term = current_error if "P" in controller_type else 0.0
+        integral_term = integral_value / integral_time if uses_integral else 0.0
+        derivative_term = derivative_time * derivative_value if uses_derivative else 0.0
+        return controller_gain * (proportional_term + integral_term + derivative_term)
+
+    for index in range(1, time.size):
+        step = time[index] - time[index - 1]
+        error[index - 1] = setpoint - response[index - 1]
+        derivative = (
+            0.0
+            if index == 1
+            else -(response[index - 1] - response[index - 2])
+            / (time[index - 1] - time[index - 2])
+        )
+        candidate_integral = (
+            integral + error[index - 1] * step
+            if uses_integral
+            else integral
+        )
+        candidate_control = calculate_control(
+            error[index - 1],
+            candidate_integral,
+            derivative,
+        )
+        saturated_control = float(np.clip(candidate_control, -control_limit, control_limit))
+        if uses_integral and (
+            candidate_control == saturated_control
+            or candidate_control * error[index - 1] < 0
+        ):
+            integral = candidate_integral
+
+        control[index - 1] = float(np.clip(
+            calculate_control(error[index - 1], integral, derivative),
+            -control_limit,
+            control_limit,
+        ))
+        delayed_time = time[index - 1] - delay
+        delayed_disturbance = np.interp(
+            delayed_time,
+            time,
+            disturbance_target,
+            left=baseline,
+            right=disturbance_target[-1],
+        )
+        delayed_control = np.interp(
+            delayed_time,
+            time[:index],
+            control[:index],
+            left=0.0,
+            right=control[index - 1],
+        )
+        interval_target = delayed_disturbance + delayed_control
+        decay = np.exp(-step / time_constant)
+        response[index] = interval_target + (response[index - 1] - interval_target) * decay
+
+    error[-1] = setpoint - response[-1]
+    final_derivative = (
+        0.0
+        if time.size == 1
+        else -(response[-1] - response[-2]) / (time[-1] - time[-2])
+    )
+    control[-1] = float(np.clip(
+        calculate_control(error[-1], integral, final_derivative),
+        -control_limit,
+        control_limit,
+    ))
+    return response, error, control
+
+
+def pi_control_response(
+    time,
+    baseline,
+    disturbance_target,
+    time_constant,
+    proportional_gain,
+    integral_time,
+    control_limit,
+    setpoint,
+    delay=0.0,
+):
+    """Simulate the PI variant while preserving the existing public function."""
+    return controller_response(
+        time,
+        baseline,
+        disturbance_target,
+        time_constant,
+        "PI",
+        proportional_gain,
+        integral_time,
+        0.0,
+        control_limit,
+        setpoint,
+        delay,
+    )
+
+
+def controller_steady_state(
+    disturbance_steady_state,
+    setpoint,
+    controller_type,
+    controller_gain,
+    control_limit,
+):
+    """Return the theoretical steady output for the selected controller type."""
+    if controller_type not in CONTROLLER_TYPES:
+        raise ValueError(f"Неизвестный тип регулятора: {controller_type}")
+    if controller_gain < 0:
+        raise ValueError("Коэффициент K не может быть отрицательным.")
+    if control_limit <= 0:
+        raise ValueError("Ограничение управляющего воздействия должно быть больше нуля.")
+    if not np.all(np.isfinite([
+        disturbance_steady_state,
+        setpoint,
+        controller_gain,
+        control_limit,
+    ])):
+        raise ValueError("Параметры установившегося режима должны быть конечными числами.")
+
+    if controller_gain == 0:
+        return float(disturbance_steady_state)
+    if "I" in controller_type:
+        required_control = setpoint - disturbance_steady_state
+    else:
+        unconstrained_output = (
+            disturbance_steady_state + controller_gain * setpoint
+        ) / (1.0 + controller_gain)
+        required_control = controller_gain * (setpoint - unconstrained_output)
+    return float(
+        disturbance_steady_state
+        + np.clip(required_control, -control_limit, control_limit)
+    )
+
+
+def tune_pi_parameters(time_constant, delay):
+    """Tune a PI controller for the unity-gain first-order object using an IMC rule."""
+    return tune_controller_parameters("PI", time_constant, delay)
+
+
+def tune_controller_parameters(controller_type, time_constant, delay):
+    """Tune P, PI, PID, or PD settings for the unity-gain first-order object."""
+    if controller_type not in CONTROLLER_TYPES:
+        raise ValueError(f"Неизвестный тип регулятора: {controller_type}")
+    if not np.all(np.isfinite([time_constant, delay])):
+        raise ValueError("Параметры автоподбора должны быть конечными числами.")
+    if time_constant <= 0:
+        raise ValueError("Постоянная времени должна быть больше нуля.")
+    if delay < 0:
+        raise ValueError("Запаздывание не может быть отрицательным.")
+
+    base_closed_loop_time = max(0.5 * time_constant, delay)
+    uses_derivative = "D" in controller_type
+    closed_loop_time = (
+        0.5 * base_closed_loop_time
+        if uses_derivative and delay > 0
+        else base_closed_loop_time
+    )
+    proportional_gain = time_constant / (closed_loop_time + delay)
+    integral_time = (
+        min(time_constant, 4.0 * (closed_loop_time + delay))
+        if "I" in controller_type
+        else None
+    )
+    derivative_time = delay / 3.0 if uses_derivative else None
+    return {
+        "controller_type": controller_type,
+        "proportional_gain": proportional_gain,
+        "integral_time": integral_time,
+        "derivative_time": derivative_time,
+        "closed_loop_time": closed_loop_time,
     }

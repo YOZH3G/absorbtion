@@ -6,6 +6,7 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolb
 from matplotlib.figure import Figure
 
 from calculations import (
+    CONTROLLER_TYPES,
     IMPULSE,
     RAMP,
     RECTANGLE,
@@ -13,9 +14,12 @@ from calculations import (
     calculate_xna,
     calculate_xog,
     combine_fractions,
+    controller_response,
+    controller_steady_state,
     disturbance_profile,
     first_order_response,
     transition_metrics,
+    tune_controller_parameters,
 )
 from validation import parse_fraction, parse_nonnegative_number, parse_positive_number
 
@@ -80,10 +84,22 @@ class AbsorptionApp(ttk.Frame):
         self.simulation_duration = tk.StringVar(value="100")
         self.effect_duration = tk.StringVar(value="10")
         self.time_constant = tk.StringVar(value="10")
-        self.delay = tk.StringVar(value="0")
+        self.delay = tk.StringVar(value="2")
+        self.controller_enabled = tk.BooleanVar(value=False)
+        self.controller_type = tk.StringVar(value="PI")
+        self.proportional_gain = tk.StringVar(value="2")
+        self.integral_time = tk.StringVar(value="20")
+        self.derivative_time = tk.StringVar(value="1")
+        self.control_limit = tk.StringVar(value="100")
+        self.setpoint = tk.StringVar(value=self._format_number(DEFAULT_MODEL_VALUES["xog_initial"]))
         self.component_error = tk.StringVar()
         self.flow_error = tk.StringVar()
         self.dynamics_error = tk.StringVar()
+        self.controller_error = tk.StringVar()
+        self.tuning_summary = tk.StringVar(value="Автоподбор ещё не выполнялся.")
+        self.controller_settings_title = tk.StringVar(value="Настройки PI-регулятора")
+        self.controller_formula = tk.StringVar()
+        self.controller_on_text = tk.StringVar(value="С PI-регулятором")
         self.component_label = tk.StringVar()
         self.component_symbol = tk.StringVar()
         self.flow_label = tk.StringVar()
@@ -91,6 +107,9 @@ class AbsorptionApp(ttk.Frame):
         self.baseline_result = tk.StringVar(value="—")
         self.disturbance_result = tk.StringVar(value="—")
         self.calculated_result = tk.StringVar(value="—")
+        self.final_result = tk.StringVar(value="—")
+        self.result_mode = tk.StringVar(value="Без регулятора")
+        self.settling_time_label = tk.StringVar(value="Длительность установления (±5%)")
         self.calculation_steps = tk.StringVar(value="Выполните расчёт, чтобы увидеть происхождение результата.")
         self.transition_values = {
             key: tk.StringVar(value="—")
@@ -101,11 +120,16 @@ class AbsorptionApp(ttk.Frame):
                 "relative_deviation",
                 "time_constant",
                 "settling_time",
+                "settling_moment",
                 "static_error",
             )
         }
         self.response_subtitle = tk.StringVar()
+        self.primary_chart_title = tk.StringVar(value="Возмущающее воздействие")
+        self.primary_chart_subtitle = tk.StringVar(value="Изменение относительно базового уровня")
+        self.response_chart_title = tk.StringVar(value="Кривая разгона")
         self.status_text = tk.StringVar(value="Готово к расчёту")
+        self.controller_signal_axis = None
 
         self._configure_window()
         self._configure_styles()
@@ -192,14 +216,15 @@ class AbsorptionApp(ttk.Frame):
             ("disturbances", "Возмущения"),
             ("dynamics", "Динамика"),
             ("results", "Результаты"),
+            ("controller", "Регулятор"),
         )
         for row, (key, label) in enumerate(active_navigation, start=2):
             button = ttk.Button(sidebar, text=label, command=lambda page=key: self._show_page(page), style="SidebarNav.TButton")
             button.grid(row=row, column=0, sticky="ew", pady=2)
             self.nav_buttons[key] = button
 
-        ttk.Separator(sidebar).grid(row=5, column=0, sticky="ew", padx=8, pady=16)
-        for row, label in enumerate(("Регулятор · скоро", "Сценарии · скоро", "Экспорт · скоро"), start=6):
+        ttk.Separator(sidebar).grid(row=6, column=0, sticky="ew", padx=8, pady=16)
+        for row, label in enumerate(("Сценарии · скоро", "Экспорт · скоро"), start=7):
             ttk.Button(sidebar, text=label, state="disabled", style="FutureSidebarNav.TButton").grid(row=row, column=0, sticky="ew", pady=2)
 
         inspector = ttk.Frame(body, style="App.TFrame", padding=(16, 16, 12, 12))
@@ -212,7 +237,7 @@ class AbsorptionApp(ttk.Frame):
         page_host.grid(row=1, column=0, sticky="nsew")
         page_host.columnconfigure(0, weight=1)
         page_host.rowconfigure(0, weight=1)
-        for key in ("disturbances", "dynamics", "results"):
+        for key in ("disturbances", "dynamics", "results", "controller"):
             page = ttk.Frame(page_host, style="App.TFrame")
             page.grid(row=0, column=0, sticky="nsew")
             page.columnconfigure(0, weight=1)
@@ -223,6 +248,7 @@ class AbsorptionApp(ttk.Frame):
         self._build_control_diagram(self.pages["disturbances"])
         self._build_dynamics_card(self.pages["dynamics"])
         self._build_result_card(self.pages["results"])
+        self._build_controller_card(self.pages["controller"])
 
         actions = ttk.Frame(inspector, style="App.TFrame")
         actions.grid(row=2, column=0, sticky="ew", pady=(12, 0))
@@ -241,13 +267,13 @@ class AbsorptionApp(ttk.Frame):
         self.disturbance_axis, self.disturbance_canvas, self.disturbance_toolbar = self._build_chart_card(
             workspace,
             row=1,
-            title="Возмущающее воздействие",
-            subtitle="Изменение относительно базового уровня",
+            title_variable=self.primary_chart_title,
+            subtitle_variable=self.primary_chart_subtitle,
         )
         self.response_axis, self.response_canvas, self.response_toolbar = self._build_chart_card(
             workspace,
             row=2,
-            title="Кривая разгона",
+            title_variable=self.response_chart_title,
             subtitle_variable=self.response_subtitle,
         )
 
@@ -279,6 +305,7 @@ class AbsorptionApp(ttk.Frame):
             "disturbances": "Возмущения",
             "dynamics": "Динамика объекта",
             "results": "Результаты расчёта",
+            "controller": "Регулятор",
         }
         self.pages[page].tkraise()
         self.page_title.set(titles[page])
@@ -433,6 +460,7 @@ class AbsorptionApp(ttk.Frame):
             if parsed_values is None:
                 return
             self.model_values = parsed_values.copy()
+            self.setpoint.set(self._format_number(self._current_baseline()))
             close_dialog()
             self._reset()
             self._set_status("Параметры модели обновлены")
@@ -581,6 +609,91 @@ class AbsorptionApp(ttk.Frame):
             variable.trace_add("write", self._update_dynamics_summary)
         self._update_disturbance_type()
 
+    def _build_controller_card(self, parent):
+        card = self._card(parent, 0, padding=(14, 10))
+        ttk.Label(card, text="Режим управления", style="CardTitle.TLabel").grid(
+            row=0, column=0, columnspan=2, sticky="w", pady=(0, 10)
+        )
+        self.controller_off_button = ttk.Button(
+            card,
+            text="Без регулятора",
+            command=lambda: self._set_controller_mode(False),
+            style="SelectedSegment.TButton",
+        )
+        self.controller_off_button.grid(row=1, column=0, sticky="ew")
+        self.controller_on_button = ttk.Button(
+            card,
+            textvariable=self.controller_on_text,
+            command=lambda: self._set_controller_mode(True),
+            style="Segment.TButton",
+        )
+        self.controller_on_button.grid(row=1, column=1, sticky="ew", padx=(4, 0))
+        card.columnconfigure((0, 1), weight=1)
+
+        parameters = self._card(parent, 1, padding=(14, 10))
+        ttk.Label(parameters, textvariable=self.controller_settings_title, style="CardTitle.TLabel").grid(
+            row=0, column=0, columnspan=2, sticky="w", pady=(0, 8)
+        )
+        ttk.Label(parameters, text="Тип регулятора", style="Body.TLabel").grid(
+            row=1, column=0, sticky="w", pady=3
+        )
+        self.controller_type_box = ttk.Combobox(
+            parameters,
+            textvariable=self.controller_type,
+            values=CONTROLLER_TYPES,
+            state="readonly",
+            width=10,
+        )
+        self.controller_type_box.grid(row=1, column=1, sticky="e", pady=3, padx=(10, 0))
+        self.controller_type_box.bind("<<ComboboxSelected>>", self._update_controller_type)
+        fields = (
+            ("Коэффициент регулятора K", self.proportional_gain, "proportional_gain_entry"),
+            ("Время интегрирования Ti, с", self.integral_time, "integral_time_entry"),
+            ("Время дифференцирования Td, с", self.derivative_time, "derivative_time_entry"),
+            ("Ограничение |u|", self.control_limit, "control_limit_entry"),
+            ("Заданное значение", self.setpoint, "setpoint_entry"),
+        )
+        self.controller_entries = []
+        for row, (label, variable, attribute) in enumerate(fields, start=2):
+            ttk.Label(parameters, text=label, style="Body.TLabel").grid(row=row, column=0, sticky="w", pady=3)
+            entry = ttk.Entry(parameters, textvariable=variable, width=12, state="disabled")
+            entry.grid(row=row, column=1, sticky="e", pady=3, padx=(10, 0))
+            setattr(self, attribute, entry)
+            self.controller_entries.append(entry)
+        self.auto_tune_button = ttk.Button(
+            parameters,
+            text="Подобрать автоматически",
+            command=self._auto_tune_controller,
+            style="Secondary.TButton",
+        )
+        self.auto_tune_button.grid(row=7, column=0, columnspan=2, sticky="ew", pady=(8, 4))
+        ttk.Label(
+            parameters,
+            textvariable=self.tuning_summary,
+            style="Muted.TLabel",
+            wraplength=330,
+        ).grid(row=8, column=0, columnspan=2, sticky="w", pady=(3, 0))
+        ttk.Label(
+            parameters,
+            textvariable=self.controller_error,
+            style="Error.TLabel",
+            wraplength=330,
+        ).grid(row=9, column=0, columnspan=2, sticky="w", pady=(5, 0))
+        parameters.columnconfigure(0, weight=1)
+
+        explanation = self._card(parent, 2, padding=(14, 10))
+        ttk.Label(explanation, text="Учебная модель", style="CardTitle.TLabel").grid(
+            row=0, column=0, sticky="w", pady=(0, 6)
+        )
+        ttk.Label(
+            explanation,
+            textvariable=self.controller_formula,
+            style="Body.TLabel",
+            justify="left",
+            wraplength=330,
+        ).grid(row=1, column=0, sticky="w")
+        self._update_controller_type()
+
     def _build_result_card(self, parent):
         card = self._card(parent, 0)
         ttk.Label(card, text="Результат", style="CardTitle.TLabel").grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 12))
@@ -588,6 +701,8 @@ class AbsorptionApp(ttk.Frame):
             ("Базовое значение", self.baseline_result),
             ("Суммарная доля", self.disturbance_result),
             ("Расчётное значение", self.calculated_result),
+            ("Режим", self.result_mode),
+            ("В конце моделирования", self.final_result),
         )
         for row, (label, variable) in enumerate(rows, start=1):
             ttk.Label(card, text=label, style="Body.TLabel").grid(row=row, column=0, sticky="w", pady=6)
@@ -616,17 +731,27 @@ class AbsorptionApp(ttk.Frame):
             ("Максимальное отклонение", "maximum_deviation"),
             ("Относительное отклонение", "relative_deviation"),
             ("Постоянная времени T", "time_constant"),
-            ("Время регулирования (±5%)", "settling_time"),
-            ("Статическая ошибка y₀ − yуст", "static_error"),
+            (self.settling_time_label, "settling_time"),
+            ("Момент установления на графике", "settling_moment"),
+            ("Статическая ошибка eуст", "static_error"),
         )
         for row, (label, key) in enumerate(metric_rows, start=1):
-            ttk.Label(metrics, text=label, style="Body.TLabel").grid(row=row, column=0, sticky="w", pady=3)
+            label_options = {"textvariable": label} if isinstance(label, tk.StringVar) else {"text": label}
+            ttk.Label(metrics, style="Body.TLabel", **label_options).grid(row=row, column=0, sticky="w", pady=3)
             ttk.Label(metrics, textvariable=self.transition_values[key], style="ResultValue.TLabel").grid(
                 row=row, column=1, sticky="e", pady=3, padx=(8, 0)
             )
         metrics.columnconfigure(0, weight=1)
 
-    def _build_chart_card(self, parent, row, title, subtitle=None, subtitle_variable=None):
+    def _build_chart_card(
+        self,
+        parent,
+        row,
+        title=None,
+        subtitle=None,
+        title_variable=None,
+        subtitle_variable=None,
+    ):
         card = ttk.Frame(parent, style="Card.TFrame", padding=(16, 12))
         card.grid(row=row, column=0, sticky="nsew", pady=(0, 8) if row == 0 else (8, 0))
         card.columnconfigure(0, weight=1)
@@ -635,7 +760,10 @@ class AbsorptionApp(ttk.Frame):
         header = ttk.Frame(card, style="CardBody.TFrame")
         header.grid(row=0, column=0, sticky="ew", pady=(0, 6))
         header.columnconfigure(0, weight=1)
-        ttk.Label(header, text=title, style="CardTitle.TLabel").grid(row=0, column=0, sticky="w")
+        if title_variable is not None:
+            ttk.Label(header, textvariable=title_variable, style="CardTitle.TLabel").grid(row=0, column=0, sticky="w")
+        else:
+            ttk.Label(header, text=title, style="CardTitle.TLabel").grid(row=0, column=0, sticky="w")
         if subtitle_variable is not None:
             ttk.Label(header, textvariable=subtitle_variable, style="Muted.TLabel").grid(row=1, column=0, sticky="w", pady=(2, 0))
         else:
@@ -685,7 +813,126 @@ class AbsorptionApp(ttk.Frame):
             self.flow_symbol.set("Gа")
             self.response_subtitle.set("Концентрация насыщенного абсорбента")
 
+        self.setpoint.set(self._format_number(self._current_baseline()))
         self._reset()
+
+    def _current_baseline(self):
+        return (
+            self.model_values["xog_initial"]
+            if self.chain == LEAN_GAS
+            else self.model_values["xna_initial"]
+        )
+
+    def _update_controller_type(self, _event=None):
+        controller_type = self.controller_type.get()
+        self.controller_settings_title.set(f"Настройки {controller_type}-регулятора")
+        self.controller_on_text.set(f"С {controller_type}-регулятором")
+        formulas = {
+            "P": "u(t) = K · e(t)",
+            "PI": "u(t) = K · (e(t) + 1/Ti · ∫e(t)dt)",
+            "PID": "u(t) = K · (e(t) + 1/Ti · ∫e(t)dt − Td · dy(t)/dt)",
+            "PD": "u(t) = K · (e(t) − Td · dy(t)/dt)",
+        }
+        details = []
+        if "I" in controller_type:
+            details.append("Интегратор защищён от насыщения.")
+        if "D" in controller_type:
+            details.append("Производная берётся по выходу без скачка от задания.")
+        details.append("|u| задаёт предел воздействия.")
+        self.controller_formula.set(
+            f"{formulas[controller_type]}\n\n"
+            f"{' '.join(details)}\n\n"
+            "Подбор: λ = max(0.5T, L); для PID/PD при L > 0 — λ/2; "
+            "K = T/(λ + L); Ti = min(T, 4(λ + L)); Td = L/3."
+        )
+        self.auto_tune_button.configure(state="normal")
+        self.tuning_summary.set(f"Автоподбор {controller_type} готов к запуску.")
+        self._update_controller_entry_states()
+        if hasattr(self, "disturbance_axis") and _event is not None:
+            self._clear_result_values()
+            self._draw_static_charts()
+            self._set_status("Тип регулятора изменён — выполните расчёт")
+
+    def _update_controller_entry_states(self):
+        enabled = self.controller_enabled.get()
+        controller_type = self.controller_type.get()
+        states = {
+            self.proportional_gain_entry: enabled,
+            self.integral_time_entry: enabled and "I" in controller_type,
+            self.derivative_time_entry: enabled and "D" in controller_type,
+            self.control_limit_entry: enabled,
+            self.setpoint_entry: enabled,
+        }
+        for entry, active in states.items():
+            entry.configure(state="normal" if active else "disabled")
+
+    def _set_controller_mode(self, enabled):
+        self.controller_enabled.set(enabled)
+        self.settling_time_label.set(
+            "Длительность регулирования (±5%)"
+            if enabled
+            else "Длительность установления (±5%)"
+        )
+        self.controller_off_button.configure(
+            style="Segment.TButton" if enabled else "SelectedSegment.TButton"
+        )
+        self.controller_on_button.configure(
+            style="SelectedSegment.TButton" if enabled else "Segment.TButton"
+        )
+        self._update_controller_entry_states()
+        self.controller_error.set("")
+        if hasattr(self, "disturbance_axis"):
+            self._clear_result_values()
+            self._draw_static_charts()
+            self._set_status("Режим управления изменён — выполните расчёт")
+
+    def _auto_tune_controller(self):
+        fields = (
+            ("Постоянная времени T", self.time_constant, self.time_constant_entry, parse_positive_number),
+            ("Запаздывание L", self.delay, self.delay_entry, parse_nonnegative_number),
+        )
+        parsed = {}
+        self.dynamics_error.set("")
+        for _label, _variable, entry, _parser in fields:
+            entry.configure(style="TEntry")
+
+        for label, variable, entry, parser in fields:
+            try:
+                parsed[label] = parser(variable.get())
+            except ValueError as error:
+                entry.configure(style="Error.TEntry")
+                self.dynamics_error.set(f"{label}: {error}")
+                self._show_page("dynamics")
+                self._set_status("Исправьте параметры динамики", error=True)
+                return
+
+        controller_type = self.controller_type.get()
+        tuning = tune_controller_parameters(
+            controller_type,
+            parsed["Постоянная времени T"],
+            parsed["Запаздывание L"],
+        )
+        self._set_controller_mode(True)
+        self.proportional_gain.set(self._format_number(tuning["proportional_gain"]))
+        if tuning["integral_time"] is not None:
+            self.integral_time.set(self._format_number(tuning["integral_time"]))
+        if tuning["derivative_time"] is not None:
+            self.derivative_time.set(self._format_number(tuning["derivative_time"]))
+        tuned_parameters = [
+            f"K={self._format_number(tuning['proportional_gain'])}",
+        ]
+        if tuning["integral_time"] is not None:
+            tuned_parameters.append(f"Ti={self._format_number(tuning['integral_time'])} с")
+        if tuning["derivative_time"] is not None:
+            tuned_parameters.append(f"Td={self._format_number(tuning['derivative_time'])} с")
+        self.tuning_summary.set(
+            f"Для T={self._format_number(parsed['Постоянная времени T'])} с, "
+            f"L={self._format_number(parsed['Запаздывание L'])} с: "
+            f"λ={self._format_number(tuning['closed_loop_time'])} с, "
+            f"{', '.join(tuned_parameters)}."
+        )
+        self._show_page("controller")
+        self._set_status(f"Настройки {controller_type}-регулятора подобраны — выполните расчёт")
 
     def _draw_control_diagram(self):
         if not hasattr(self, "control_diagram"):
@@ -764,6 +1011,7 @@ class AbsorptionApp(ttk.Frame):
         self.component_error.set("")
         self.flow_error.set("")
         self.dynamics_error.set("")
+        self.controller_error.set("")
         self.component_entry.configure(style="TEntry")
         self.flow_entry.configure(style="TEntry")
         for entry in (
@@ -773,6 +1021,8 @@ class AbsorptionApp(ttk.Frame):
             self.time_constant_entry,
             self.delay_entry,
         ):
+            entry.configure(style="TEntry")
+        for entry in self.controller_entries:
             entry.configure(style="TEntry")
 
     def _read_fraction(self, enabled, value, error_variable, entry):
@@ -833,6 +1083,39 @@ class AbsorptionApp(ttk.Frame):
             "delay": parsed["Запаздывание L"],
         }
 
+    def _read_controller_parameters(self):
+        if not self.controller_enabled.get():
+            return None
+
+        controller_type = self.controller_type.get()
+        fields = [
+            ("Коэффициент K", self.proportional_gain, self.proportional_gain_entry, parse_nonnegative_number),
+            ("Ограничение |u|", self.control_limit, self.control_limit_entry, parse_positive_number),
+            ("Заданное значение", self.setpoint, self.setpoint_entry, parse_positive_number),
+        ]
+        if "I" in controller_type:
+            fields.append(("Время интегрирования Ti", self.integral_time, self.integral_time_entry, parse_positive_number))
+        if "D" in controller_type:
+            fields.append(("Время дифференцирования Td", self.derivative_time, self.derivative_time_entry, parse_nonnegative_number))
+        parsed = {}
+        for label, variable, entry, parser in fields:
+            try:
+                parsed[label] = parser(variable.get())
+            except ValueError as error:
+                entry.configure(style="Error.TEntry")
+                self.controller_error.set(f"{label}: {error}")
+                self._show_page("controller")
+                raise
+
+        return {
+            "controller_type": controller_type,
+            "controller_gain": parsed["Коэффициент K"],
+            "integral_time": parsed.get("Время интегрирования Ti", 1.0),
+            "derivative_time": parsed.get("Время дифференцирования Td", 0.0),
+            "control_limit": parsed["Ограничение |u|"],
+            "setpoint": parsed["Заданное значение"],
+        }
+
     def _calculate(self):
         self._clear_errors()
         try:
@@ -843,6 +1126,7 @@ class AbsorptionApp(ttk.Frame):
                 self.flow_enabled.get(), self.flow_value, self.flow_error, self.flow_entry
             )
             dynamics = self._read_dynamic_parameters()
+            controller = self._read_controller_parameters()
         except ValueError:
             self._set_status("Исправьте значение", error=True)
             return
@@ -907,15 +1191,65 @@ class AbsorptionApp(ttk.Frame):
             baseline,
             calculated,
         )
-        metrics = transition_metrics(
-            time,
-            responses["Совместное воздействие"],
-            targets["Совместное воздействие"],
-            baseline,
-        )
-        self._update_transition_metrics(metrics, dynamics)
-        self._draw_disturbance(time, profile, component_fraction, flow_fraction)
-        self._draw_response(time, responses)
+        if controller is None:
+            final_response = responses["Совместное воздействие"]
+            metrics = transition_metrics(
+                time,
+                final_response,
+                targets["Совместное воздействие"],
+                baseline,
+            )
+            self.result_mode.set("Без регулятора")
+            metric_response_start = dynamics["start_time"] + dynamics["delay"]
+            self._draw_disturbance(time, profile, component_fraction, flow_fraction)
+            self._draw_response(time, responses)
+        else:
+            controlled_response, error, control = controller_response(
+                time,
+                baseline,
+                targets["Совместное воздействие"],
+                dynamics["time_constant"],
+                controller["controller_type"],
+                controller["controller_gain"],
+                controller["integral_time"],
+                controller["derivative_time"],
+                controller["control_limit"],
+                controller["setpoint"],
+                dynamics["delay"],
+            )
+            final_response = controlled_response
+            steady_state = controller_steady_state(
+                targets["Совместное воздействие"][-1],
+                controller["setpoint"],
+                controller["controller_type"],
+                controller["controller_gain"],
+                controller["control_limit"],
+            )
+            setpoint_target = np.full_like(time, steady_state)
+            metrics = transition_metrics(
+                time,
+                controlled_response,
+                setpoint_target,
+                baseline,
+            )
+            metrics["static_error"] = controller["setpoint"] - steady_state
+            self.result_mode.set(f"С {controller['controller_type']}-регулятором")
+            metric_response_start = (
+                dynamics["delay"]
+                if controller["setpoint"] != baseline
+                else dynamics["start_time"] + dynamics["delay"]
+            )
+            self._draw_controller_signals(time, error, control)
+            self._draw_control_comparison(
+                time,
+                responses["Совместное воздействие"],
+                controlled_response,
+                controller["setpoint"],
+                controller["controller_type"],
+            )
+
+        self.final_result.set(self._format_number(final_response[-1]))
+        self._update_transition_metrics(metrics, dynamics, metric_response_start)
         self._show_page("results")
         self._set_status("Расчёт выполнен")
 
@@ -942,13 +1276,14 @@ class AbsorptionApp(ttk.Frame):
             f"{self._format_number(calculated)}"
         )
 
-    def _update_transition_metrics(self, metrics, dynamics):
+    def _update_transition_metrics(self, metrics, dynamics, response_start):
         settling_time = metrics["settling_time"]
         if settling_time is None:
             settling_text = "не достигнуто"
+            settling_moment_text = "не достигнут"
         else:
-            response_start = dynamics["start_time"] + dynamics["delay"]
             settling_text = f"{max(0.0, settling_time - response_start):.1f} с"
+            settling_moment_text = f"t = {settling_time:.1f} с"
 
         relative_deviation = metrics["relative_deviation"]
         self.transition_values["initial"].set(self._format_number(metrics["initial_value"]))
@@ -959,6 +1294,7 @@ class AbsorptionApp(ttk.Frame):
         )
         self.transition_values["time_constant"].set(f"{self._format_number(dynamics['time_constant'])} с")
         self.transition_values["settling_time"].set(settling_text)
+        self.transition_values["settling_moment"].set(settling_moment_text)
         self.transition_values["static_error"].set(self._format_signed_number(metrics["static_error"]))
 
     def _reset(self):
@@ -970,25 +1306,31 @@ class AbsorptionApp(ttk.Frame):
         self.flow_entry.configure(state="disabled")
         self.calculate_button.configure(state="disabled")
         self._clear_errors()
-        self.baseline_result.set("—")
-        self.disturbance_result.set("—")
-        self.calculated_result.set("—")
-        self.calculation_steps.set("Выполните расчёт, чтобы увидеть происхождение результата.")
-        for variable in self.transition_values.values():
-            variable.set("—")
+        self._clear_result_values()
         self._draw_control_diagram()
         self._draw_static_charts()
         self._set_status("Готово к расчёту")
 
-    def _draw_static_charts(self):
-        baseline = (
-            self.model_values["xog_initial"]
-            if self.chain == LEAN_GAS
-            else self.model_values["xna_initial"]
+    def _clear_result_values(self):
+        self.baseline_result.set("—")
+        self.disturbance_result.set("—")
+        self.calculated_result.set("—")
+        self.final_result.set("—")
+        self.result_mode.set(
+            f"С {self.controller_type.get()}-регулятором"
+            if self.controller_enabled.get()
+            else "Без регулятора"
         )
+        self.calculation_steps.set("Выполните расчёт, чтобы увидеть происхождение результата.")
+        for variable in self.transition_values.values():
+            variable.set("—")
+
+    def _draw_static_charts(self):
+        baseline = self._current_baseline()
         simulation_duration = self._safe_simulation_duration()
         time = np.linspace(0.0, simulation_duration, 501)
         self._draw_disturbance(time, np.zeros_like(time), 0.0, 0.0)
+        self.response_chart_title.set("Кривая разгона")
         self._style_axis(self.response_axis, "Время", "Концентрация")
         self.response_axis.plot(
             [0, simulation_duration],
@@ -1002,6 +1344,9 @@ class AbsorptionApp(ttk.Frame):
         self.response_canvas.draw_idle()
 
     def _draw_disturbance(self, time, profile, component_fraction, flow_fraction):
+        self._remove_controller_axis()
+        self.primary_chart_title.set("Возмущающее воздействие")
+        self.primary_chart_subtitle.set("Изменение относительно базового уровня")
         component_signal = component_fraction * profile
         flow_signal = flow_fraction * profile
         combined_signal = (1 + component_signal) * (1 + flow_signal) - 1
@@ -1016,6 +1361,7 @@ class AbsorptionApp(ttk.Frame):
         self.disturbance_canvas.draw_idle()
 
     def _draw_response(self, time, responses):
+        self.response_chart_title.set("Кривая разгона")
         self._style_axis(self.response_axis, "Время, с", "Концентрация")
         for label, response in responses.items():
             color, linestyle = CURVE_STYLES[label]
@@ -1030,6 +1376,82 @@ class AbsorptionApp(ttk.Frame):
         self.response_axis.margins(x=0.02, y=0.12)
         self.response_axis.legend(loc="best", frameon=False, fontsize=8, ncol=2)
         self.response_canvas.draw_idle()
+
+    def _draw_controller_signals(self, time, error, control):
+        self._remove_controller_axis()
+        self.primary_chart_title.set("Ошибка и управляющее воздействие")
+        self.primary_chart_subtitle.set("Сигналы замкнутой системы")
+        self._style_axis(self.disturbance_axis, "Время, с", "Ошибка e(t)")
+        error_line = self.disturbance_axis.plot(
+            time,
+            error,
+            color="#F59E0B",
+            linewidth=2,
+            label="Ошибка e(t)",
+        )[0]
+        self.disturbance_axis.axhline(0.0, color=MUTED, linestyle="--", linewidth=1)
+
+        self.controller_signal_axis = self.disturbance_axis.twinx()
+        control_line = self.controller_signal_axis.plot(
+            time,
+            control,
+            color="#16A34A",
+            linewidth=2,
+            label="Воздействие u(t)",
+        )[0]
+        self.controller_signal_axis.set_ylabel("Управляющее воздействие u(t)", color=TEXT)
+        self.controller_signal_axis.tick_params(colors=TEXT)
+        self.controller_signal_axis.spines["top"].set_visible(False)
+        self.controller_signal_axis.spines["right"].set_color(BORDER)
+        self.disturbance_axis.margins(x=0.02, y=0.15)
+        self.disturbance_axis.legend(
+            [error_line, control_line],
+            [error_line.get_label(), control_line.get_label()],
+            loc="best",
+            frameon=False,
+            fontsize=8,
+        )
+        self.disturbance_canvas.draw_idle()
+
+    def _draw_control_comparison(
+        self,
+        time,
+        open_response,
+        controlled_response,
+        setpoint,
+        controller_type,
+    ):
+        self.response_chart_title.set(f"Без регулятора / {controller_type}-регулятор")
+        self._style_axis(self.response_axis, "Время, с", "Концентрация")
+        self.response_axis.axhline(
+            setpoint,
+            color=MUTED,
+            linestyle="--",
+            linewidth=1.5,
+            label="Задание",
+        )
+        self.response_axis.plot(
+            time,
+            open_response,
+            color="#F59E0B",
+            linewidth=2,
+            label="Без регулятора",
+        )
+        self.response_axis.plot(
+            time,
+            controlled_response,
+            color=ACCENT,
+            linewidth=2.4,
+            label=f"{controller_type}-регулятор",
+        )
+        self.response_axis.margins(x=0.02, y=0.12)
+        self.response_axis.legend(loc="best", frameon=False, fontsize=8, ncol=3)
+        self.response_canvas.draw_idle()
+
+    def _remove_controller_axis(self):
+        if self.controller_signal_axis is not None:
+            self.controller_signal_axis.remove()
+            self.controller_signal_axis = None
 
     def _safe_simulation_duration(self):
         try:
