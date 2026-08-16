@@ -2,8 +2,8 @@ import unittest
 
 import numpy as np
 
-from calculations import STEP
-from simulation import LEAN_GAS, RICH_ABSORBENT, run_simulation
+from app.calculations import STEP
+from app.simulation import LEAN_GAS, RICH_ABSORBENT, run_simulation
 
 
 MODEL_VALUES = {

@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from settings_store import DEFAULT_SETTINGS, SettingsStore
+from app.settings_store import DEFAULT_SETTINGS, SettingsStore
 
 
 class SettingsStoreTests(unittest.TestCase):

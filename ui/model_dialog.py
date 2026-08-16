@@ -1,7 +1,7 @@
 import tkinter as tk
 from tkinter import ttk
 
-from validation import parse_positive_number
+from app.validation import parse_positive_number
 
 
 class ModelParametersDialog(tk.Toplevel):

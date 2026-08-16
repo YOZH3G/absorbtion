@@ -1,6 +1,6 @@
 import numpy as np
 
-from calculations import (
+from .calculations import (
     calculate_xna,
     calculate_xog,
     combine_fractions,
@@ -16,16 +16,7 @@ LEAN_GAS = "lean_gas"
 RICH_ABSORBENT = "rich_absorbent"
 
 
-def run_simulation(
-    chain,
-    model_values,
-    component_fraction,
-    flow_fraction,
-    dynamics,
-    controller=None,
-    point_count=501,
-):
-    """Calculate all open- and closed-loop signals without touching the GUI."""
+def _chain_calculator(chain, model_values):
     if chain == LEAN_GAS:
         baseline = model_values["xog_initial"]
         outlet_flow = model_values["gg"] * model_values["xg"] / baseline
@@ -38,7 +29,9 @@ def run_simulation(
                 component,
                 flow,
             )
-    elif chain == RICH_ABSORBENT:
+
+        return baseline, calculate
+    if chain == RICH_ABSORBENT:
         baseline = model_values["xna_initial"]
         absorbent_flow = model_values["gna"] * baseline / model_values["xa"]
 
@@ -50,8 +43,22 @@ def run_simulation(
                 component,
                 flow,
             )
-    else:
-        raise ValueError(f"Неизвестная цепь управления: {chain}")
+
+        return baseline, calculate
+    raise ValueError(f"Неизвестная цепь управления: {chain}")
+
+
+def run_simulation(
+    chain,
+    model_values,
+    component_fraction,
+    flow_fraction,
+    dynamics,
+    controller=None,
+    point_count=501,
+):
+    """Calculate all open- and closed-loop signals without touching the GUI."""
+    baseline, calculate = _chain_calculator(chain, model_values)
 
     combined_fraction = combine_fractions(component_fraction, flow_fraction)
     calculated = calculate(component_fraction, flow_fraction)

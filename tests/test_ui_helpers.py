@@ -1,7 +1,7 @@
 import unittest
 
-from calculations import CONTROLLER_TYPES
-from ui_helpers import DISTURBANCE_HELP, FORMULAS, ICON_PATTERNS
+from app.calculations import CONTROLLER_TYPES
+from ui.ui_helpers import DISTURBANCE_HELP, FORMULAS, ICON_PATTERNS
 
 
 class UiResourceTests(unittest.TestCase):

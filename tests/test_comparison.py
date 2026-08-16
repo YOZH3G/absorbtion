@@ -5,7 +5,7 @@ from pathlib import Path
 
 import numpy as np
 
-from comparison import build_comparison_run, write_comparison_csv
+from app.comparison import build_comparison_run, write_comparison_csv
 
 
 def calculation_result(settling_time=12.0):

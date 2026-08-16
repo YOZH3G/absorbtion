@@ -5,7 +5,7 @@ analysis = Analysis(
     ["main.py"],
     pathex=[],
     binaries=[],
-    datas=[("builtin_scenarios.json", ".")],
+    datas=[("data/builtin_scenarios.json", "data")],
     hiddenimports=["matplotlib.backends.backend_tkagg"],
     hookspath=[],
     hooksconfig={},

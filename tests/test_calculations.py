@@ -2,7 +2,7 @@ import unittest
 
 import numpy as np
 
-from calculations import (
+from app.calculations import (
     CONTROLLER_TYPES,
     IMPULSE,
     RAMP,

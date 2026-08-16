@@ -2,11 +2,11 @@ import json
 import math
 from pathlib import Path
 
-from calculations import CONTROLLER_TYPES
+from .calculations import CONTROLLER_TYPES
 
 
 def _load_builtin_scenarios():
-    path = Path(__file__).with_name("builtin_scenarios.json")
+    path = Path(__file__).parent.parent / "data" / "builtin_scenarios.json"
     payload = json.loads(path.read_text(encoding="utf-8"))
     if payload.get("version") != 1 or not isinstance(payload.get("scenarios"), list):
         raise ValueError("Некорректный формат встроенных сценариев.")
@@ -19,6 +19,11 @@ DIRECTION_OPTIONS = ("Увеличится", "Уменьшится", "Не из�
 FASTEST_OPTIONS = ("Без регулятора", "С регулятором", "Одинаково", "Без сравнения")
 CORRECTION_OPTIONS = ("Да", "Нет", "Регулятор выключен")
 PREDICTION_KEYS = ("direction", "steady", "fastest", "correction")
+HIDDEN_ANSWER_OPTIONS = {
+    "direction": (DIRECTION_OPTIONS, "Скрытый ответ направления недопустим."),
+    "fastest": (FASTEST_OPTIONS, "Скрытый ответ скорости недопустим."),
+    "correction": (CORRECTION_OPTIONS, "Скрытый ответ действия регулятора недопустим."),
+}
 DEFAULT_LESSON = {
     "task": "Спрогнозируйте реакцию объекта, выполните расчёт и сформулируйте вывод.",
     "guidance": "Сначала оцените направление и скорость реакции, затем сравните прогноз с графиком.",
@@ -211,18 +216,12 @@ def _normalize_hidden_answers(answers):
     if not isinstance(answers, dict):
         raise ValueError("Скрытые ответы должны быть объектом JSON.")
     normalized = {}
-    if "direction" in answers:
-        if answers["direction"] not in DIRECTION_OPTIONS:
-            raise ValueError("Скрытый ответ направления недопустим.")
-        normalized["direction"] = answers["direction"]
-    if "fastest" in answers:
-        if answers["fastest"] not in FASTEST_OPTIONS:
-            raise ValueError("Скрытый ответ скорости недопустим.")
-        normalized["fastest"] = answers["fastest"]
-    if "correction" in answers:
-        if answers["correction"] not in CORRECTION_OPTIONS:
-            raise ValueError("Скрытый ответ действия регулятора недопустим.")
-        normalized["correction"] = answers["correction"]
+    for key, (options, error_message) in HIDDEN_ANSWER_OPTIONS.items():
+        if key not in answers:
+            continue
+        if answers[key] not in options:
+            raise ValueError(error_message)
+        normalized[key] = answers[key]
     if "steady" in answers:
         try:
             steady = float(answers["steady"])

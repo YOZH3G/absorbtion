@@ -2,8 +2,8 @@ import copy
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-from calculations import CONTROLLER_TYPES
-from scenario_store import CHAINS, DISTURBANCE_TYPES, normalize_scenario
+from app.calculations import CONTROLLER_TYPES
+from app.scenario_store import CHAINS, DISTURBANCE_TYPES, normalize_scenario
 
 
 CHAIN_LABELS = {
@@ -391,10 +391,10 @@ class ScenarioEditorDialog(tk.Toplevel):
         ttk.Label(tab, text="Скрытые правильные ответы (необязательно)", style="CardTitle.TLabel").grid(
             row=11, column=0, columnspan=3, sticky="w", pady=(0, 6)
         )
-        self._optional_combobox(tab, 12, "Направление", "answer_direction", ("", "Увеличится", "Уменьшится", "Не изменится"))
+        self._combobox(tab, 12, "Направление", "answer_direction", ("", "Увеличится", "Уменьшится", "Не изменится"))
         self._entry(tab, 13, "Установившееся значение", "answer_steady")
-        self._optional_combobox(tab, 14, "Скорость реакции", "answer_fastest", ("", "Без регулятора", "С регулятором", "Одинаково", "Без сравнения"))
-        self._optional_combobox(tab, 15, "Действие регулятора", "answer_correction", ("", "Да", "Нет", "Регулятор выключен"))
+        self._combobox(tab, 14, "Скорость реакции", "answer_fastest", ("", "Без регулятора", "С регулятором", "Одинаково", "Без сравнения"))
+        self._combobox(tab, 15, "Действие регулятора", "answer_correction", ("", "Да", "Нет", "Регулятор выключен"))
 
     def _text_field(self, parent, row, label, key, height):
         ttk.Label(parent, text=label, style="Body.TLabel").grid(
@@ -422,9 +422,6 @@ class ScenarioEditorDialog(tk.Toplevel):
         self._field_widgets[minimum_key] = minimum
         self._field_widgets[maximum_key] = maximum
         return minimum, maximum
-
-    def _optional_combobox(self, parent, row, label, key, values):
-        return self._combobox(parent, row, label, key, values)
 
     def _entry(self, parent, row, label, key):
         ttk.Label(parent, text=label, style="Body.TLabel").grid(

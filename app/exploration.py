@@ -4,7 +4,7 @@ import copy
 
 import numpy as np
 
-from simulation import run_simulation
+from .simulation import run_simulation
 
 
 SENSITIVITY_PARAMETERS = (

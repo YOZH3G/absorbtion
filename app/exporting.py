@@ -6,11 +6,10 @@ from io import BytesIO
 from pathlib import Path
 
 import numpy as np
-from matplotlib.backends.backend_pdf import PdfPages
 from matplotlib.figure import Figure
 
-from laboratory import format_protocol
-from simulation import LEAN_GAS
+from .laboratory import format_protocol
+from .simulation import LEAN_GAS
 
 
 def save_graphs(signal_figure, response_figure, selected_path):
@@ -127,10 +126,7 @@ def write_html_report(
     prediction=None,
     comparison_runs=(),
 ):
-    images = "".join(
-        f'<img src="data:image/png;base64,{_figure_base64(figure)}" alt="График расчёта">'
-        for figure in figures
-    )
+    images = _figures_markup(figures, "График расчёта")
     score = "Не оценивалось" if evaluation is None else f"{evaluation['score']} из {evaluation['total']}"
     questions = "".join(f"<li>{html.escape(question)}</li>" for question in lesson["questions"])
     prediction_markup = _prediction_markup(prediction)
@@ -181,10 +177,7 @@ def write_comparison_html_report(selected_path, runs):
     if not runs:
         raise ValueError("Нет закреплённых опытов для отчёта.")
     figures = build_comparison_figures(runs)
-    images = "".join(
-        f'<img src="data:image/png;base64,{_figure_base64(figure)}" alt="График сравнения">'
-        for figure in figures
-    )
+    images = _figures_markup(figures, "График сравнения")
     report = f"""<!doctype html>
 <html lang="ru"><head><meta charset="utf-8"><title>Отчёт по сравнению опытов</title>
 <style>body{{font:16px Segoe UI,Arial,sans-serif;color:#1f2937;max-width:1040px;margin:32px auto;line-height:1.5}}h1,h2{{color:#10243e}}table{{border-collapse:collapse;width:100%}}th,td{{padding:8px;border:1px solid #d7dce2;text-align:left}}th{{background:#f4f6f8}}img{{max-width:100%;margin:18px 0;border:1px solid #d7dce2}}</style></head>
@@ -248,7 +241,16 @@ def _figure_base64(figure):
     return base64.b64encode(buffer.getvalue()).decode("ascii")
 
 
+def _figures_markup(figures, alt_text):
+    return "".join(
+        f'<img src="data:image/png;base64,{_figure_base64(figure)}" alt="{alt_text}">'
+        for figure in figures
+    )
+
+
 def _write_pdf(selected_path, figures):
+    from matplotlib.backends.backend_pdf import PdfPages
+
     path = Path(selected_path)
     with PdfPages(path) as pdf:
         for figure in figures:

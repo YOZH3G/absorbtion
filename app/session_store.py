@@ -76,8 +76,7 @@ def _deserialize_run(run):
 
 def _serialize_signal(values, label):
     signal = np.asarray(values, dtype=float)
-    if signal.ndim != 1 or not signal.size or not np.isfinite(signal).all():
-        raise ValueError(f"Опыт: {label} должен быть непустым конечным одномерным сигналом.")
+    _validate_signal(signal, label)
     return signal.tolist()
 
 
@@ -86,9 +85,13 @@ def _deserialize_signal(values, label):
         signal = np.asarray(values, dtype=float)
     except (TypeError, ValueError) as error:
         raise ValueError(f"Опыт: {label} должен быть числовым сигналом.") from error
+    _validate_signal(signal, label)
+    return signal
+
+
+def _validate_signal(signal, label):
     if signal.ndim != 1 or not signal.size or not np.isfinite(signal).all():
         raise ValueError(f"Опыт: {label} должен быть непустым конечным одномерным сигналом.")
-    return signal
 
 
 def _finite_number(value, label):

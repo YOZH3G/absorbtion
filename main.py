@@ -6,8 +6,8 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolb
 from matplotlib.colors import ListedColormap
 from matplotlib.figure import Figure
 
-from app_info import APP_NAME, APP_VERSION
-from calculations import (
+from app.app_info import APP_NAME, APP_VERSION
+from app.calculations import (
     CONTROLLER_TYPES,
     IMPULSE,
     RAMP,
@@ -15,8 +15,8 @@ from calculations import (
     STEP,
     tune_controller_parameters,
 )
-from comparison import MAX_COMPARISON_RUNS, build_comparison_run, write_comparison_csv
-from exporting import (
+from app.comparison import MAX_COMPARISON_RUNS, build_comparison_run, write_comparison_csv
+from app.exporting import (
     build_protocol,
     save_graphs,
     write_comparison_html_report,
@@ -26,32 +26,32 @@ from exporting import (
     write_pdf_report,
     write_protocol,
 )
-from exploration import (
+from app.exploration import (
     MAP_CATEGORIES,
     SENSITIVITY_PARAMETERS,
     controller_setting_map,
     sensitivity_runs,
 )
-from laboratory import (
+from app.laboratory import (
     CORRECTION_OPTIONS,
     DIRECTION_OPTIONS,
     FASTEST_OPTIONS,
     evaluate_prediction,
 )
-from model_dialog import ModelParametersDialog
-from scenario_editor import ScenarioEditorDialog
-from scenario_store import ScenarioStore
-from session_store import read_session, write_session
-from settings_store import SettingsStore
-from simulation import LEAN_GAS, RICH_ABSORBENT, run_simulation
-from ui_helpers import (
+from app.scenario_store import ScenarioStore
+from app.session_store import read_session, write_session
+from app.settings_store import SettingsStore
+from app.simulation import LEAN_GAS, RICH_ABSORBENT, run_simulation
+from app.validation import parse_fraction, parse_nonnegative_number, parse_positive_number
+from ui.model_dialog import ModelParametersDialog
+from ui.scenario_editor import ScenarioEditorDialog
+from ui.ui_helpers import (
     DisturbanceTooltip,
     FormulaPanel,
     ScrollablePage,
     TextTooltip,
     create_icon,
 )
-from validation import parse_fraction, parse_nonnegative_number, parse_positive_number
 
 
 BACKGROUND = "#F4F6F8"
@@ -1782,11 +1782,7 @@ class AbsorptionApp(ttk.Frame):
             )
             return
         self.comparison_counter += 1
-        scenario_name = (
-            self.active_scenario.get().removeprefix("Применён: ").removesuffix(".")
-            if self.active_scenario.get().startswith("Применён:")
-            else "Свободный расчёт"
-        )
+        scenario_name = self._active_scenario_title()
         name = f"Опыт {self.comparison_counter}: {scenario_name}"
         run = build_comparison_run(
             self.last_calculation,
@@ -2247,44 +2243,24 @@ class AbsorptionApp(ttk.Frame):
         self._set_status("Протокол сохранён")
 
     def _save_html_report(self):
-        selected = filedialog.asksaveasfilename(
-            parent=self.root,
-            title="Сохранить отчёт лабораторной работы",
-            defaultextension=".html",
-            filetypes=(("HTML", "*.html"),),
-            initialfile="absorption_lab_report.html",
-        )
-        if not selected:
-            return
-        title = self.active_scenario.get().removeprefix("Применён: ").removesuffix(".")
-        try:
-            path = write_html_report(
-                selected, self.last_calculation, title, self.current_lesson,
-                self.assignment_evaluation, self.student_name.get(),
-                self.student_conclusion.get(),
-                (self.disturbance_axis.figure, self.response_axis.figure),
-                prediction=self.last_prediction,
-                comparison_runs=self.comparison_runs,
-            )
-        except OSError as error:
-            self._set_status(f"Не удалось сохранить HTML-отчёт: {error}", error=True)
-            return
-        self.export_summary.set(f"HTML-отчёт сохранён: {path.name}.")
-        self._set_status("HTML-отчёт сохранён")
+        self._save_lab_report("html", write_html_report)
 
     def _save_pdf_report(self):
+        self._save_lab_report("pdf", write_pdf_report)
+
+    def _save_lab_report(self, format_name, writer):
         selected = filedialog.asksaveasfilename(
             parent=self.root,
             title="Сохранить отчёт лабораторной работы",
-            defaultextension=".pdf",
-            filetypes=(("PDF", "*.pdf"),),
-            initialfile="absorption_lab_report.pdf",
+            defaultextension=f".{format_name}",
+            filetypes=((format_name.upper(), f"*.{format_name}"),),
+            initialfile=f"absorption_lab_report.{format_name}",
         )
         if not selected:
             return
-        title = self.active_scenario.get().removeprefix("Применён: ").removesuffix(".")
+        title = self._active_scenario_title()
         try:
-            path = write_pdf_report(
+            path = writer(
                 selected, self.last_calculation, title, self.current_lesson,
                 self.assignment_evaluation, self.student_name.get(),
                 self.student_conclusion.get(),
@@ -2293,14 +2269,25 @@ class AbsorptionApp(ttk.Frame):
                 comparison_runs=self.comparison_runs,
             )
         except OSError as error:
-            self._set_status(f"Не удалось сохранить PDF-отчёт: {error}", error=True)
+            self._set_status(
+                f"Не удалось сохранить {format_name.upper()}-отчёт: {error}",
+                error=True,
+            )
             return
-        self.export_summary.set(f"PDF-отчёт сохранён: {path.name}.")
-        self._set_status("PDF-отчёт сохранён")
+        self.export_summary.set(f"{format_name.upper()}-отчёт сохранён: {path.name}.")
+        self._set_status(f"{format_name.upper()}-отчёт сохранён")
 
     def _build_protocol_text(self):
-        title = self.active_scenario.get() if self.active_scenario.get().startswith("Применён:") else "Свободный расчёт"
+        title = self._active_scenario_title(include_prefix=True)
         return build_protocol(self.last_calculation, title)
+
+    def _active_scenario_title(self, include_prefix=False):
+        title = self.active_scenario.get()
+        if not title.startswith("Применён:"):
+            return "Свободный расчёт"
+        if include_prefix:
+            return title
+        return title.removeprefix("Применён: ").removesuffix(".")
 
     def _select_chain(self, chain):
         self.chain = chain
@@ -2679,11 +2666,7 @@ class AbsorptionApp(ttk.Frame):
             if settling_time is None
             else f"установление {max(0.0, settling_time - result['response_start']):.1f} с"
         )
-        active_name = (
-            self.active_scenario.get().removeprefix("Применён: ").removesuffix(".")
-            if self.active_scenario.get().startswith("Применён:")
-            else "Свободный расчёт"
-        )
+        active_name = self._active_scenario_title()
         self.topbar_context.set(
             f"{active_name} · {result['result_mode'].lower()} · "
             f"отклонение {result['metrics']['maximum_deviation']:.4g} · {settling_summary}"

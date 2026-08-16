@@ -1,8 +1,8 @@
 import unittest
 
-from calculations import STEP
-from exploration import MAP_CATEGORIES, controller_setting_map, sensitivity_runs
-from simulation import LEAN_GAS
+from app.calculations import STEP
+from app.exploration import MAP_CATEGORIES, controller_setting_map, sensitivity_runs
+from app.simulation import LEAN_GAS
 
 
 MODEL_VALUES = {

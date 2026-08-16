@@ -4,8 +4,8 @@ from pathlib import Path
 
 from matplotlib.figure import Figure
 
-from calculations import STEP
-from exporting import (
+from app.calculations import STEP
+from app.exporting import (
     build_comparison_figures,
     build_protocol,
     save_graphs,
@@ -16,7 +16,7 @@ from exporting import (
     write_pdf_report,
     write_protocol,
 )
-from simulation import LEAN_GAS, run_simulation
+from app.simulation import LEAN_GAS, run_simulation
 
 
 class ExportTests(unittest.TestCase):

@@ -3,8 +3,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from laboratory import SCENARIOS
-from scenario_store import FORMAT_VERSION, ScenarioStore, normalize_scenario
+from app.laboratory import SCENARIOS
+from app.scenario_store import FORMAT_VERSION, ScenarioStore, normalize_scenario
 
 
 def custom_scenario(name="Пользовательский сценарий"):

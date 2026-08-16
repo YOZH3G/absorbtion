@@ -2,13 +2,14 @@ import unittest
 
 import numpy as np
 
-from calculations import controller_response, disturbance_profile, transition_metrics
-from laboratory import (
+from app.calculations import controller_response, disturbance_profile, transition_metrics
+from app.laboratory import (
     SCENARIOS,
     evaluate_prediction,
     expected_direction,
     expected_fastest,
     format_protocol,
+    normalize_lesson,
 )
 
 
@@ -71,6 +72,24 @@ class ScenarioTests(unittest.TestCase):
 
 
 class PredictionTests(unittest.TestCase):
+    def test_normalizes_hidden_answer_choices(self):
+        lesson = normalize_lesson({
+            "hidden_answers": {
+                "direction": "Увеличится",
+                "fastest": "С регулятором",
+                "correction": "Да",
+            },
+        })
+
+        self.assertEqual(
+            lesson["hidden_answers"],
+            {
+                "direction": "Увеличится",
+                "fastest": "С регулятором",
+                "correction": "Да",
+            },
+        )
+
     def test_direction_uses_disturbed_value(self):
         self.assertEqual(expected_direction(10.0, 12.0), "Увеличится")
         self.assertEqual(expected_direction(10.0, 8.0), "Уменьшится")

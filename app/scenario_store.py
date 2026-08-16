@@ -5,9 +5,9 @@ import os
 import shutil
 from pathlib import Path
 
-from calculations import CONTROLLER_TYPES
-from laboratory import SCENARIOS, normalize_lesson
-from validation import MAX_FRACTION, MIN_FRACTION
+from .calculations import CONTROLLER_TYPES
+from .laboratory import SCENARIOS, normalize_lesson
+from .validation import MAX_FRACTION, MIN_FRACTION
 
 
 FORMAT_VERSION = 1
@@ -55,14 +55,10 @@ class ScenarioStore:
         if not self.path.exists() and not self.backup_path.exists():
             return
         try:
-            self.user_scenarios = _read_bundle(self.path)
-            _ensure_unique_names(self.user_scenarios)
-            _ensure_no_builtin_names(self.user_scenarios, self.builtin_names)
+            self.user_scenarios = _read_user_bundle(self.path, self.builtin_names)
         except (OSError, ValueError, json.JSONDecodeError) as error:
             try:
-                recovered = _read_bundle(self.backup_path)
-                _ensure_unique_names(recovered)
-                _ensure_no_builtin_names(recovered, self.builtin_names)
+                recovered = _read_user_bundle(self.backup_path, self.builtin_names)
             except (OSError, ValueError, json.JSONDecodeError):
                 self.user_scenarios = []
                 self.warning = f"Пользовательские сценарии не загружены: {error}"
@@ -140,9 +136,7 @@ class ScenarioStore:
         return True
 
     def import_bundle(self, path):
-        imported = _read_bundle(Path(path))
-        _ensure_unique_names(imported)
-        _ensure_no_builtin_names(imported, self.builtin_names)
+        imported = _read_user_bundle(Path(path), self.builtin_names)
         by_name = {scenario["name"]: scenario for scenario in self.user_scenarios}
         by_name.update({scenario["name"]: scenario for scenario in imported})
         self._write(list(by_name.values()))
@@ -174,9 +168,7 @@ class ScenarioStore:
         if self.path.exists() or not legacy_path.exists() or legacy_path == self.path:
             return
         try:
-            scenarios = _read_bundle(legacy_path)
-            _ensure_unique_names(scenarios)
-            _ensure_no_builtin_names(scenarios, self.builtin_names)
+            scenarios = _read_user_bundle(legacy_path, self.builtin_names)
             self.path.parent.mkdir(parents=True, exist_ok=True)
             _write_bundle(self.path, scenarios)
         except (OSError, ValueError, json.JSONDecodeError):
@@ -312,6 +304,13 @@ def _read_bundle(path):
     if not isinstance(scenarios, list):
         raise ValueError("Поле scenarios должно содержать список.")
     return [normalize_scenario(scenario) for scenario in scenarios]
+
+
+def _read_user_bundle(path, builtin_names):
+    scenarios = _read_bundle(path)
+    _ensure_unique_names(scenarios)
+    _ensure_no_builtin_names(scenarios, builtin_names)
+    return scenarios
 
 
 def _write_bundle(path, scenarios):

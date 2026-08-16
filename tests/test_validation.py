@@ -1,6 +1,6 @@
 import unittest
 
-from validation import parse_fraction, parse_nonnegative_number, parse_positive_number
+from app.validation import parse_fraction, parse_nonnegative_number, parse_positive_number
 
 
 class FractionValidationTests(unittest.TestCase):

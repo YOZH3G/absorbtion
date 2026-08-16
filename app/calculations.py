@@ -9,6 +9,22 @@ RAMP = "ramp"
 CONTROLLER_TYPES = ("P", "PI", "PID", "PD")
 
 
+def _validate_time_series(time, target):
+    time = np.asarray(time, dtype=float)
+    target = np.asarray(target, dtype=float)
+    if time.ndim != 1 or target.shape != time.shape or time.size == 0:
+        raise ValueError("Время и целевое значение должны быть непустыми одномерными массивами одинаковой длины.")
+    if np.any(np.diff(time) <= 0):
+        raise ValueError("Значения времени должны строго возрастать.")
+    return time, target
+
+
+def _controller_features(controller_type):
+    if controller_type not in CONTROLLER_TYPES:
+        raise ValueError(f"Неизвестный тип регулятора: {controller_type}")
+    return "I" in controller_type, "D" in controller_type
+
+
 def combine_fractions(first, second):
     """Return the combined relative change for two independent fractions."""
     return (1 + first) * (1 + second) - 1
@@ -56,16 +72,11 @@ def first_order_response(
     delay=0.0,
 ):
     """Simulate T·dy/dt + y = yуст for a time-varying target value."""
-    time = np.asarray(time, dtype=float)
-    target = np.asarray(target, dtype=float)
-    if time.ndim != 1 or target.shape != time.shape or time.size == 0:
-        raise ValueError("Время и целевое значение должны быть непустыми одномерными массивами одинаковой длины.")
+    time, target = _validate_time_series(time, target)
     if time_constant <= 0:
         raise ValueError("Постоянная времени должна быть больше нуля.")
     if delay < 0:
         raise ValueError("Запаздывание не может быть отрицательным.")
-    if np.any(np.diff(time) <= 0):
-        raise ValueError("Значения времени должны строго возрастать.")
 
     delayed_target = np.interp(time - delay, time, target, left=baseline, right=target[-1])
     response = np.empty_like(time)
@@ -135,20 +146,12 @@ def controller_response(
     delay=0.0,
 ):
     """Simulate a first-order object controlled by a selected ideal controller."""
-    time = np.asarray(time, dtype=float)
-    disturbance_target = np.asarray(disturbance_target, dtype=float)
-    if time.ndim != 1 or disturbance_target.shape != time.shape or time.size == 0:
-        raise ValueError("Время и целевое значение должны быть непустыми одномерными массивами одинаковой длины.")
-    if np.any(np.diff(time) <= 0):
-        raise ValueError("Значения времени должны строго возрастать.")
+    time, disturbance_target = _validate_time_series(time, disturbance_target)
     if time_constant <= 0:
         raise ValueError("Постоянная времени должна быть больше нуля.")
-    if controller_type not in CONTROLLER_TYPES:
-        raise ValueError(f"Неизвестный тип регулятора: {controller_type}")
+    uses_integral, uses_derivative = _controller_features(controller_type)
     if controller_gain < 0:
         raise ValueError("Коэффициент K не может быть отрицательным.")
-    uses_integral = "I" in controller_type
-    uses_derivative = "D" in controller_type
     if uses_integral and integral_time <= 0:
         raise ValueError("Время интегрирования Ti должно быть больше нуля.")
     if uses_derivative and derivative_time < 0:
@@ -297,8 +300,7 @@ def controller_steady_state(
     control_limit,
 ):
     """Return the theoretical steady output for the selected controller type."""
-    if controller_type not in CONTROLLER_TYPES:
-        raise ValueError(f"Неизвестный тип регулятора: {controller_type}")
+    uses_integral, _uses_derivative = _controller_features(controller_type)
     if controller_gain < 0:
         raise ValueError("Коэффициент K не может быть отрицательным.")
     if control_limit <= 0:
@@ -313,7 +315,7 @@ def controller_steady_state(
 
     if controller_gain == 0:
         return float(disturbance_steady_state)
-    if "I" in controller_type:
+    if uses_integral:
         required_control = setpoint - disturbance_steady_state
     else:
         unconstrained_output = (
@@ -333,8 +335,7 @@ def tune_pi_parameters(time_constant, delay):
 
 def tune_controller_parameters(controller_type, time_constant, delay):
     """Tune P, PI, PID, or PD settings for the unity-gain first-order object."""
-    if controller_type not in CONTROLLER_TYPES:
-        raise ValueError(f"Неизвестный тип регулятора: {controller_type}")
+    uses_integral, uses_derivative = _controller_features(controller_type)
     if not np.all(np.isfinite([time_constant, delay])):
         raise ValueError("Параметры автоподбора должны быть конечными числами.")
     if time_constant <= 0:
@@ -343,7 +344,6 @@ def tune_controller_parameters(controller_type, time_constant, delay):
         raise ValueError("Запаздывание не может быть отрицательным.")
 
     base_closed_loop_time = max(0.5 * time_constant, delay)
-    uses_derivative = "D" in controller_type
     closed_loop_time = (
         0.5 * base_closed_loop_time
         if uses_derivative and delay > 0
@@ -352,7 +352,7 @@ def tune_controller_parameters(controller_type, time_constant, delay):
     proportional_gain = time_constant / (closed_loop_time + delay)
     integral_time = (
         min(time_constant, 4.0 * (closed_loop_time + delay))
-        if "I" in controller_type
+        if uses_integral
         else None
     )
     derivative_time = delay / 3.0 if uses_derivative else None

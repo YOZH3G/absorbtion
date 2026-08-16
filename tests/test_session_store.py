@@ -5,7 +5,7 @@ from pathlib import Path
 
 import numpy as np
 
-from session_store import read_session, write_session
+from app.session_store import read_session, write_session
 
 
 def run():
