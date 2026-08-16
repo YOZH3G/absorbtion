@@ -12,6 +12,7 @@ from calculations import (
     combine_fractions,
     disturbance_profile,
     first_order_response,
+    transition_metrics,
 )
 
 
@@ -99,6 +100,43 @@ class DynamicModelTests(unittest.TestCase):
         )
         self.assertTrue(np.all(response[self.time < 5.0] == 10.0))
         self.assertGreater(response[self.time > 5.0][0], 10.0)
+
+    def test_transition_metrics_for_settled_step(self):
+        time = np.linspace(0.0, 20.0, 201)
+        target = np.where(time >= 2.0, 20.0, 10.0)
+        response = first_order_response(time, 10.0, target, time_constant=2.0)
+
+        metrics = transition_metrics(time, response, target, baseline=10.0)
+
+        self.assertEqual(metrics["initial_value"], 10.0)
+        self.assertEqual(metrics["steady_state"], 20.0)
+        self.assertAlmostEqual(metrics["maximum_deviation"], 10.0, places=2)
+        self.assertGreater(metrics["relative_deviation"], 99.9)
+        self.assertGreater(metrics["settling_time"], 7.0)
+        self.assertLess(metrics["settling_time"], 8.2)
+        self.assertEqual(metrics["static_error"], -10.0)
+
+    def test_transition_metrics_report_unsettled_response(self):
+        time = np.linspace(0.0, 3.0, 31)
+        target = np.where(time >= 2.0, 20.0, 10.0)
+        response = first_order_response(time, 10.0, target, time_constant=10.0)
+
+        metrics = transition_metrics(time, response, target, baseline=10.0)
+
+        self.assertIsNone(metrics["settling_time"])
+
+    def test_transition_metrics_for_temporary_disturbance_return_to_baseline(self):
+        time = np.linspace(0.0, 30.0, 301)
+        profile = disturbance_profile(time, RECTANGLE, start_time=2.0, duration=3.0)
+        target = 10.0 + 5.0 * profile
+        response = first_order_response(time, 10.0, target, time_constant=2.0)
+
+        metrics = transition_metrics(time, response, target, baseline=10.0)
+
+        self.assertEqual(metrics["steady_state"], 10.0)
+        self.assertGreater(metrics["maximum_deviation"], 0.0)
+        self.assertIsNotNone(metrics["settling_time"])
+        self.assertEqual(metrics["static_error"], 0.0)
 
 
 if __name__ == "__main__":

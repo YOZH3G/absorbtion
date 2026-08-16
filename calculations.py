@@ -75,3 +75,45 @@ def first_order_response(
         response[index] = interval_target + (response[index - 1] - interval_target) * decay
 
     return response
+
+
+def transition_metrics(time, response, target, baseline, settling_band=0.05):
+    """Return teaching metrics for a simulated transition process."""
+    time = np.asarray(time, dtype=float)
+    response = np.asarray(response, dtype=float)
+    target = np.asarray(target, dtype=float)
+    if (
+        time.ndim != 1
+        or response.shape != time.shape
+        or target.shape != time.shape
+        or time.size == 0
+    ):
+        raise ValueError("Время, отклик и целевое значение должны быть непустыми одномерными массивами одинаковой длины.")
+    if not 0 < settling_band < 1:
+        raise ValueError("Полоса регулирования должна быть долей от нуля до единицы.")
+
+    steady_state = float(target[-1])
+    maximum_deviation = float(np.max(np.abs(response - baseline)))
+    relative_deviation = (
+        maximum_deviation / abs(baseline) * 100.0
+        if baseline != 0
+        else None
+    )
+    reference_deviation = max(maximum_deviation, abs(steady_state - baseline))
+    tolerance = settling_band * reference_deviation
+    outside = np.flatnonzero(np.abs(response - steady_state) > tolerance)
+    if outside.size == 0:
+        settling_time = float(time[0])
+    elif outside[-1] + 1 < time.size:
+        settling_time = float(time[outside[-1] + 1])
+    else:
+        settling_time = None
+
+    return {
+        "initial_value": float(response[0]),
+        "steady_state": steady_state,
+        "maximum_deviation": maximum_deviation,
+        "relative_deviation": relative_deviation,
+        "settling_time": settling_time,
+        "static_error": float(baseline - steady_state),
+    }

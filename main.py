@@ -15,6 +15,7 @@ from calculations import (
     combine_fractions,
     disturbance_profile,
     first_order_response,
+    transition_metrics,
 )
 from validation import parse_fraction, parse_nonnegative_number, parse_positive_number
 
@@ -90,6 +91,19 @@ class AbsorptionApp(ttk.Frame):
         self.baseline_result = tk.StringVar(value="—")
         self.disturbance_result = tk.StringVar(value="—")
         self.calculated_result = tk.StringVar(value="—")
+        self.calculation_steps = tk.StringVar(value="Выполните расчёт, чтобы увидеть происхождение результата.")
+        self.transition_values = {
+            key: tk.StringVar(value="—")
+            for key in (
+                "initial",
+                "steady",
+                "maximum_deviation",
+                "relative_deviation",
+                "time_constant",
+                "settling_time",
+                "static_error",
+            )
+        }
         self.response_subtitle = tk.StringVar()
         self.status_text = tk.StringVar(value="Готово к расчёту")
 
@@ -100,7 +114,7 @@ class AbsorptionApp(ttk.Frame):
 
     def _configure_window(self):
         self.root.title("Анализ процесса абсорбции")
-        self.root.geometry("1600x950")
+        self.root.geometry("1600x1000")
         self.root.minsize(1200, 780)
         self.root.configure(background=BACKGROUND)
         self.pack(fill="both", expand=True)
@@ -206,6 +220,7 @@ class AbsorptionApp(ttk.Frame):
 
         self._build_chain_card(self.pages["disturbances"])
         self._build_disturbance_card(self.pages["disturbances"])
+        self._build_control_diagram(self.pages["disturbances"])
         self._build_dynamics_card(self.pages["dynamics"])
         self._build_result_card(self.pages["results"])
 
@@ -491,6 +506,29 @@ class AbsorptionApp(ttk.Frame):
         )
         card.columnconfigure(0, weight=1)
 
+    def _build_control_diagram(self, parent):
+        card = self._card(parent, 2, padding=(14, 12))
+        ttk.Label(card, text="Структурная схема", style="CardTitle.TLabel").grid(
+            row=0, column=0, sticky="w", pady=(0, 6)
+        )
+        ttk.Label(
+            card,
+            text="Включённые возмущения подсвечиваются синим.",
+            style="Muted.TLabel",
+        ).grid(row=1, column=0, sticky="w", pady=(0, 6))
+        self.control_diagram = tk.Canvas(
+            card,
+            width=340,
+            height=180,
+            background=CARD_BACKGROUND,
+            borderwidth=0,
+            highlightthickness=0,
+        )
+        self.control_diagram.grid(row=2, column=0, sticky="ew")
+        self.component_value.trace_add("write", lambda *_: self._draw_control_diagram())
+        self.flow_value.trace_add("write", lambda *_: self._draw_control_diagram())
+        self._draw_control_diagram()
+
     def _build_dynamics_card(self, parent):
         card = self._card(parent, 0)
         ttk.Label(card, text="Параметры времени и формы", style="CardTitle.TLabel").grid(
@@ -556,6 +594,38 @@ class AbsorptionApp(ttk.Frame):
             ttk.Label(card, textvariable=variable, style="ResultValue.TLabel").grid(row=row, column=1, sticky="e", pady=6)
         card.columnconfigure(0, weight=1)
 
+        calculation = self._card(parent, 1)
+        ttk.Label(calculation, text="Ход расчёта", style="CardTitle.TLabel").grid(
+            row=0, column=0, sticky="w", pady=(0, 10)
+        )
+        ttk.Label(
+            calculation,
+            textvariable=self.calculation_steps,
+            style="Body.TLabel",
+            justify="left",
+            wraplength=330,
+        ).grid(row=1, column=0, sticky="w")
+
+        metrics = self._card(parent, 2)
+        ttk.Label(metrics, text="Показатели переходного процесса", style="CardTitle.TLabel").grid(
+            row=0, column=0, columnspan=2, sticky="w", pady=(0, 8)
+        )
+        metric_rows = (
+            ("Начальное значение", "initial"),
+            ("Установившееся значение", "steady"),
+            ("Максимальное отклонение", "maximum_deviation"),
+            ("Относительное отклонение", "relative_deviation"),
+            ("Постоянная времени T", "time_constant"),
+            ("Время регулирования (±5%)", "settling_time"),
+            ("Статическая ошибка y₀ − yуст", "static_error"),
+        )
+        for row, (label, key) in enumerate(metric_rows, start=1):
+            ttk.Label(metrics, text=label, style="Body.TLabel").grid(row=row, column=0, sticky="w", pady=3)
+            ttk.Label(metrics, textvariable=self.transition_values[key], style="ResultValue.TLabel").grid(
+                row=row, column=1, sticky="e", pady=3, padx=(8, 0)
+            )
+        metrics.columnconfigure(0, weight=1)
+
     def _build_chart_card(self, parent, row, title, subtitle=None, subtitle_variable=None):
         card = ttk.Frame(parent, style="Card.TFrame", padding=(16, 12))
         card.grid(row=row, column=0, sticky="nsew", pady=(0, 8) if row == 0 else (8, 0))
@@ -617,12 +687,57 @@ class AbsorptionApp(ttk.Frame):
 
         self._reset()
 
+    def _draw_control_diagram(self):
+        if not hasattr(self, "control_diagram"):
+            return
+
+        canvas = self.control_diagram
+        canvas.delete("all")
+        active_fill = "#DBEAFE"
+        inactive_fill = "#F3F4F6"
+        component_symbol = "Xг" if self.chain == LEAN_GAS else "Xа"
+        flow_symbol = "Gг" if self.chain == LEAN_GAS else "Gа"
+        output_symbol = "Xог" if self.chain == LEAN_GAS else "Xна"
+
+        def disturbance_box(y, symbol, enabled, value):
+            fill = active_fill if enabled else inactive_fill
+            outline = ACCENT if enabled else BORDER
+            canvas.create_rectangle(8, y, 112, y + 40, fill=fill, outline=outline, width=2)
+            canvas.create_text(
+                60,
+                y + 20,
+                text=self._diagram_disturbance_text(symbol, enabled, value),
+                fill=ACCENT_ACTIVE if enabled else MUTED,
+                font=("Segoe UI", 9, "bold" if enabled else "normal"),
+                width=94,
+            )
+
+        disturbance_box(10, component_symbol, self.component_enabled.get(), self.component_value.get())
+        disturbance_box(106, flow_symbol, self.flow_enabled.get(), self.flow_value.get())
+        canvas.create_line(112, 30, 148, 66, fill=MUTED, width=2, arrow=tk.LAST)
+        canvas.create_line(112, 126, 148, 90, fill=MUTED, width=2, arrow=tk.LAST)
+        canvas.create_rectangle(148, 48, 282, 106, fill="#EAF2FF", outline=ACCENT, width=2)
+        canvas.create_text(215, 77, text="Объект управления", fill=TEXT, font=("Segoe UI", 10, "bold"), width=120)
+        canvas.create_line(215, 106, 215, 134, fill=MUTED, width=2, arrow=tk.LAST)
+        canvas.create_rectangle(148, 136, 282, 174, fill="#ECFDF3", outline=SUCCESS, width=2)
+        canvas.create_text(215, 155, text=f"Выходная концентрация {output_symbol}", fill=TEXT, font=("Segoe UI", 9, "bold"), width=124)
+
+    @staticmethod
+    def _diagram_disturbance_text(symbol, enabled, value):
+        if not enabled:
+            return f"{symbol}  выключено"
+        try:
+            return f"{symbol}  {float(value) * 100:+.1f}%"
+        except ValueError:
+            return f"{symbol}  активно"
+
     def _update_input_states(self):
         self._set_entry_state(self.component_entry, self.component_enabled.get(), self.component_value)
         self._set_entry_state(self.flow_entry, self.flow_enabled.get(), self.flow_value)
         enabled = self.component_enabled.get() or self.flow_enabled.get()
         self.calculate_button.configure(state="normal" if enabled else "disabled")
         self._clear_errors()
+        self._draw_control_diagram()
 
     def _update_dynamics_summary(self, *_):
         self.dynamics_summary.set(
@@ -785,9 +900,66 @@ class AbsorptionApp(ttk.Frame):
         self.baseline_result.set(self._format_number(baseline))
         self.disturbance_result.set(f"{self._format_number(combined_fraction)} ({combined_fraction * 100:+.1f}%)")
         self.calculated_result.set(self._format_number(calculated))
+        self._update_calculation_steps(
+            component_fraction,
+            flow_fraction,
+            combined_fraction,
+            baseline,
+            calculated,
+        )
+        metrics = transition_metrics(
+            time,
+            responses["Совместное воздействие"],
+            targets["Совместное воздействие"],
+            baseline,
+        )
+        self._update_transition_metrics(metrics, dynamics)
         self._draw_disturbance(time, profile, component_fraction, flow_fraction)
         self._draw_response(time, responses)
+        self._show_page("results")
         self._set_status("Расчёт выполнен")
+
+    def _update_calculation_steps(
+        self,
+        component_fraction,
+        flow_fraction,
+        combined_fraction,
+        baseline,
+        calculated,
+    ):
+        component_symbol = "Xг" if self.chain == LEAN_GAS else "Xа"
+        flow_symbol = "Gг" if self.chain == LEAN_GAS else "Gа"
+        self.calculation_steps.set(
+            f"Возмущение состава {component_symbol}: {component_fraction * 100:+.1f}%\n"
+            f"Возмущение расхода {flow_symbol}: {flow_fraction * 100:+.1f}%\n\n"
+            "Совместная доля:\n"
+            f"({self._factor_expression(component_fraction)}) · "
+            f"({self._factor_expression(flow_fraction)}) − 1 = "
+            f"{self._format_signed_number(combined_fraction)}\n\n"
+            "Новое значение:\n"
+            f"{self._format_number(baseline)} · "
+            f"{self._format_number(1 + combined_fraction)} = "
+            f"{self._format_number(calculated)}"
+        )
+
+    def _update_transition_metrics(self, metrics, dynamics):
+        settling_time = metrics["settling_time"]
+        if settling_time is None:
+            settling_text = "не достигнуто"
+        else:
+            response_start = dynamics["start_time"] + dynamics["delay"]
+            settling_text = f"{max(0.0, settling_time - response_start):.1f} с"
+
+        relative_deviation = metrics["relative_deviation"]
+        self.transition_values["initial"].set(self._format_number(metrics["initial_value"]))
+        self.transition_values["steady"].set(self._format_number(metrics["steady_state"]))
+        self.transition_values["maximum_deviation"].set(self._format_number(metrics["maximum_deviation"]))
+        self.transition_values["relative_deviation"].set(
+            f"{relative_deviation:.2f}%" if relative_deviation is not None else "не определено"
+        )
+        self.transition_values["time_constant"].set(f"{self._format_number(dynamics['time_constant'])} с")
+        self.transition_values["settling_time"].set(settling_text)
+        self.transition_values["static_error"].set(self._format_signed_number(metrics["static_error"]))
 
     def _reset(self):
         self.component_enabled.set(False)
@@ -801,6 +973,10 @@ class AbsorptionApp(ttk.Frame):
         self.baseline_result.set("—")
         self.disturbance_result.set("—")
         self.calculated_result.set("—")
+        self.calculation_steps.set("Выполните расчёт, чтобы увидеть происхождение результата.")
+        for variable in self.transition_values.values():
+            variable.set("—")
+        self._draw_control_diagram()
         self._draw_static_charts()
         self._set_status("Готово к расчёту")
 
@@ -881,6 +1057,17 @@ class AbsorptionApp(ttk.Frame):
     @staticmethod
     def _format_number(value):
         return f"{value:.4f}".rstrip("0").rstrip(".")
+
+    @staticmethod
+    def _format_signed_number(value):
+        if abs(value) < 0.00005:
+            return "0"
+        return f"{value:+.4f}".rstrip("0").rstrip(".").replace("-", "−")
+
+    @staticmethod
+    def _factor_expression(fraction):
+        sign = "+" if fraction >= 0 else "−"
+        return f"1 {sign} {abs(fraction):.2f}"
 
 
 def main():
