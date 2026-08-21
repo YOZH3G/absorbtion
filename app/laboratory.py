@@ -1,3 +1,4 @@
+import copy
 import json
 import math
 from pathlib import Path
@@ -14,6 +15,7 @@ def _load_builtin_scenarios():
 
 
 SCENARIOS = _load_builtin_scenarios()
+VARIANT_COUNT = 30
 
 DIRECTION_OPTIONS = ("Увеличится", "Уменьшится", "Не изменится")
 FASTEST_OPTIONS = ("Без регулятора", "С регулятором", "Одинаково", "Без сравнения")
@@ -39,6 +41,38 @@ DEFAULT_LESSON = {
     "hidden_answers": {},
     "controller_target": None,
 }
+
+
+def builtin_variant(scenario, number=1):
+    """Return a reproducible assignment variant for a built-in scenario."""
+    if scenario.get("name") not in {item["name"] for item in SCENARIOS}:
+        raise ValueError("Варианты доступны только для встроенных сценариев.")
+    number = _integer(number, "Номер варианта", 1, VARIANT_COUNT)
+    result = copy.deepcopy(scenario)
+    if number == 1:
+        return result
+
+    index = number - 1
+    amplitude_factor = 0.60 + 0.04 * index
+    if result["component"] is not None:
+        result["component"] *= amplitude_factor
+    if result["flow"] is not None:
+        result["flow"] *= amplitude_factor
+
+    result["start_time"] = 6.0 + 2.0 * (index % 5)
+    result["simulation_duration"] = max(
+        result["simulation_duration"], result["start_time"] + 70.0 + 5.0 * (index % 3)
+    )
+    result["effect_duration"] = max(1.0, result["effect_duration"] * (0.75 + 0.05 * (index % 6)))
+    result["time_constant"] *= 0.70 + 0.03 * (index % 15)
+    result["delay"] *= 0.50 + 0.05 * (index % 9)
+
+    controller = result.get("controller")
+    if controller is not None:
+        controller["gain"] *= 0.80 + 0.02 * index
+        controller["integral_time"] *= 0.75 + 0.03 * (index % 10)
+
+    return result
 
 
 def normalize_lesson(lesson):

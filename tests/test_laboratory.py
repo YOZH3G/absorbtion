@@ -5,12 +5,26 @@ import numpy as np
 from app.calculations import controller_response, disturbance_profile, transition_metrics
 from app.laboratory import (
     SCENARIOS,
+    VARIANT_COUNT,
+    builtin_variant,
     evaluate_prediction,
     expected_direction,
     expected_fastest,
     format_protocol,
     normalize_lesson,
 )
+from app.scenario_store import normalize_scenario
+from app.simulation import run_simulation
+
+
+MODEL_VALUES = {
+    "gna": 7800.0,
+    "xa": 0.5,
+    "xg": 0.5,
+    "gg": 1000.0,
+    "xog_initial": 0.8,
+    "xna_initial": 30.0,
+}
 
 
 class ScenarioTests(unittest.TestCase):
@@ -34,6 +48,67 @@ class ScenarioTests(unittest.TestCase):
                 self.assertGreater(scenario["simulation_duration"], scenario["start_time"])
                 self.assertGreater(scenario["time_constant"], 0.0)
                 self.assertGreaterEqual(scenario["delay"], 0.0)
+
+    def test_builtin_scenarios_have_thirty_reproducible_variants(self):
+        for scenario in SCENARIOS:
+            variants = [builtin_variant(scenario, number) for number in range(1, VARIANT_COUNT + 1)]
+            with self.subTest(scenario=scenario["name"]):
+                self.assertEqual(len(variants), 30)
+                self.assertEqual(builtin_variant(scenario), scenario)
+                self.assertEqual(builtin_variant(scenario, 17), builtin_variant(scenario, 17))
+                inputs = {
+                    (
+                        item["component"], item["flow"], item["start_time"],
+                        item["effect_duration"], item["time_constant"], item["delay"],
+                        tuple(sorted((item["controller"] or {}).items())),
+                    )
+                    for item in variants
+                }
+                self.assertEqual(len(inputs), VARIANT_COUNT)
+
+    def test_builtin_variant_number_is_validated_and_all_variants_run(self):
+        for scenario in SCENARIOS:
+            with self.subTest(scenario=scenario["name"]):
+                with self.assertRaisesRegex(ValueError, "1…30"):
+                    builtin_variant(scenario, 0)
+                with self.assertRaisesRegex(ValueError, "1…30"):
+                    builtin_variant(scenario, 31)
+                response_signatures = set()
+                for number in range(1, VARIANT_COUNT + 1):
+                    variant = normalize_scenario(builtin_variant(scenario, number))
+                    controller = variant["controller"]
+                    controller_data = None if controller is None else {
+                        "controller_type": controller["type"],
+                        "controller_gain": controller["gain"],
+                        "integral_time": controller["integral_time"],
+                        "derivative_time": controller["derivative_time"],
+                        "control_limit": controller["control_limit"],
+                        "setpoint": (
+                            MODEL_VALUES["xog_initial"] if variant["chain"] == "lean_gas"
+                            else MODEL_VALUES["xna_initial"]
+                        ) if controller.get("setpoint") is None else controller["setpoint"],
+                    }
+                    result = run_simulation(
+                        variant["chain"], MODEL_VALUES, variant["component"] or 0.0,
+                        variant["flow"] or 0.0,
+                        {
+                            "kind": {
+                                "Ступенчатое": "step",
+                                "Импульсное": "impulse",
+                                "Временное прямоугольное": "rectangle",
+                                "Плавно нарастающее": "ramp",
+                            }[variant["disturbance_type"]],
+                            "start_time": variant["start_time"],
+                            "simulation_duration": variant["simulation_duration"],
+                            "effect_duration": variant["effect_duration"],
+                            "time_constant": variant["time_constant"],
+                            "delay": variant["delay"],
+                        },
+                        controller_data,
+                    )
+                    self.assertTrue(np.all(np.isfinite(result["final_response"])))
+                    response_signatures.add(tuple(np.round(result["final_response"], 12)))
+                self.assertEqual(len(response_signatures), VARIANT_COUNT)
 
     def test_mistuned_controller_scenario_is_oscillatory_and_unsettled(self):
         scenario = next(

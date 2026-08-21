@@ -7,7 +7,7 @@ from matplotlib.colors import ListedColormap
 from matplotlib.figure import Figure
 
 APP_NAME = "Анализ процесса абсорбции"
-APP_VERSION = "1.4.1"
+APP_VERSION = "1.4.2"
 
 from app.calculations import (
     CONTROLLER_TYPES,
@@ -38,6 +38,8 @@ from app.laboratory import (
     CORRECTION_OPTIONS,
     DIRECTION_OPTIONS,
     FASTEST_OPTIONS,
+    VARIANT_COUNT,
+    builtin_variant,
     evaluate_prediction,
 )
 from app.scenario_store import ScenarioStore
@@ -170,6 +172,7 @@ class AbsorptionApp(ttk.Frame):
         self.response_chart_title = tk.StringVar(value="Кривая разгона")
         self.status_text = tk.StringVar(value="Готово к расчёту")
         self.selected_scenario = tk.StringVar(value=self.scenarios[0]["name"])
+        self.selected_variant = tk.StringVar(value="1")
         self.scenario_description = tk.StringVar(value=self.scenarios[0]["description"])
         self.active_scenario = tk.StringVar(value="Сценарий ещё не применён.")
         self.teacher_mode = tk.BooleanVar(value=False)
@@ -1280,53 +1283,65 @@ class AbsorptionApp(ttk.Frame):
         )
         self.scenario_box.grid(row=1, column=0, sticky="ew")
         self.scenario_box.bind("<<ComboboxSelected>>", self._update_scenario_description)
+        ttk.Label(scenario_card, text="Вариант задания", style="Body.TLabel").grid(
+            row=2, column=0, sticky="w", pady=(10, 4)
+        )
+        self.scenario_variant_box = ttk.Combobox(
+            scenario_card,
+            textvariable=self.selected_variant,
+            values=tuple(str(number) for number in range(1, VARIANT_COUNT + 1)),
+            state="readonly",
+            width=8,
+        )
+        self.scenario_variant_box.grid(row=3, column=0, sticky="w")
+        self.scenario_variant_box.bind("<<ComboboxSelected>>", self._update_scenario_description)
         ttk.Label(
             scenario_card,
             textvariable=self.scenario_description,
             style="Muted.TLabel",
             wraplength=330,
-        ).grid(row=2, column=0, sticky="w", pady=(8, 12))
+        ).grid(row=4, column=0, sticky="w", pady=(8, 12))
         ttk.Button(
             scenario_card,
             text="Применить сценарий",
             command=self._apply_scenario,
             style="Primary.TButton",
-        ).grid(row=3, column=0, sticky="ew")
+        ).grid(row=5, column=0, sticky="ew")
         ttk.Label(
             scenario_card,
             textvariable=self.active_scenario,
             style="Muted.TLabel",
             wraplength=330,
-        ).grid(row=4, column=0, sticky="w", pady=(8, 0))
+        ).grid(row=6, column=0, sticky="w", pady=(8, 0))
 
-        ttk.Separator(scenario_card).grid(row=5, column=0, sticky="ew", pady=14)
+        ttk.Separator(scenario_card).grid(row=7, column=0, sticky="ew", pady=14)
         ttk.Checkbutton(
             scenario_card,
             text="Режим преподавателя",
             variable=self.teacher_mode,
             command=self._toggle_teacher_mode,
-        ).grid(row=6, column=0, sticky="w")
+        ).grid(row=8, column=0, sticky="w")
         self.teacher_editor_button = ttk.Button(
             scenario_card,
             text="Открыть редактор сценариев",
             command=self._open_scenario_editor,
             style="Secondary.TButton",
         )
-        self.teacher_editor_button.grid(row=7, column=0, sticky="ew", pady=(10, 0))
+        self.teacher_editor_button.grid(row=9, column=0, sticky="ew", pady=(10, 0))
         self.teacher_storage_label = ttk.Label(
             scenario_card,
             textvariable=self.scenario_storage_status,
             style="Muted.TLabel",
             wraplength=330,
         )
-        self.teacher_storage_label.grid(row=8, column=0, sticky="w", pady=(8, 0))
+        self.teacher_storage_label.grid(row=10, column=0, sticky="w", pady=(8, 0))
         self.restore_scenarios_button = ttk.Button(
             scenario_card,
             text="Восстановить резервную копию",
             command=self._restore_scenario_backup,
             style="Secondary.TButton",
         )
-        self.restore_scenarios_button.grid(row=9, column=0, sticky="ew", pady=(8, 0))
+        self.restore_scenarios_button.grid(row=11, column=0, sticky="ew", pady=(8, 0))
         self.teacher_editor_button.grid_remove()
         self.teacher_storage_label.grid_remove()
         self.restore_scenarios_button.grid_remove()
@@ -1518,13 +1533,26 @@ class AbsorptionApp(ttk.Frame):
 
     def _update_scenario_description(self, _event=None):
         scenario = self.scenarios_by_name[self.selected_scenario.get()]
-        self.scenario_description.set(scenario["description"])
+        if self.scenario_store.is_builtin(scenario["name"]):
+            self.scenario_variant_box.configure(state="readonly")
+            number = int(self.selected_variant.get())
+            self.scenario_description.set(
+                f"{builtin_variant(scenario, number)['description']} Вариант {number} из {VARIANT_COUNT}."
+            )
+        else:
+            self.selected_variant.set("1")
+            self.scenario_variant_box.configure(state="disabled")
+            self.scenario_description.set(scenario["description"])
 
     def _apply_scenario(self):
         scenario = self.scenarios_by_name[self.selected_scenario.get()]
-        self._apply_scenario_data(scenario)
+        number = int(self.selected_variant.get())
+        if self.scenario_store.is_builtin(scenario["name"]):
+            self._apply_scenario_data(builtin_variant(scenario, number), number)
+        else:
+            self._apply_scenario_data(scenario)
 
-    def _apply_scenario_data(self, scenario):
+    def _apply_scenario_data(self, scenario, variant_number=None):
         self.current_lesson = scenario["lesson"]
         self.assignment_attempts = 0
         self.assignment_evaluation = None
@@ -1572,9 +1600,12 @@ class AbsorptionApp(ttk.Frame):
         self.predicted_fastest.set("")
         self.predicted_correction.set("")
         self.assignment_feedback.set("Заполните прогноз и нажмите «Рассчитать».")
-        self.active_scenario.set(f"Применён: {scenario['name']}.")
+        scenario_title = scenario["name"]
+        if variant_number is not None:
+            scenario_title += f" — вариант {variant_number}"
+        self.active_scenario.set(f"Применён: {scenario_title}.")
         self.topbar_context.set(
-            f"{scenario['name']} · "
+            f"{scenario_title} · "
             f"{'без регулятора' if controller is None else controller['type'] + '-регулятор'}"
         )
         self._draw_static_charts()
