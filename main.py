@@ -6,7 +6,9 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolb
 from matplotlib.colors import ListedColormap
 from matplotlib.figure import Figure
 
-from app.app_info import APP_NAME, APP_VERSION
+APP_NAME = "Анализ процесса абсорбции"
+APP_VERSION = "1.4.1"
+
 from app.calculations import (
     CONTROLLER_TYPES,
     IMPULSE,
