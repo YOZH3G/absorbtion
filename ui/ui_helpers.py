@@ -1,9 +1,23 @@
 import math
+import numpy as np
 import tkinter as tk
 from tkinter import ttk
 
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
+
+
+def plot_samples(time, values, bucket_count=500):
+    """Reduce rendering work while retaining extrema and jumps in each bucket."""
+    if len(time) <= 4 * bucket_count:
+        return time, values
+    indices = {0, len(time) - 1}
+    for bucket in np.array_split(np.arange(len(time)), bucket_count):
+        indices.update((int(bucket[0]), int(bucket[-1]),
+                        int(bucket[np.argmin(values[bucket])]),
+                        int(bucket[np.argmax(values[bucket])])))
+    selected = np.array(sorted(indices))
+    return time[selected], values[selected]
 
 
 ICON_PATTERNS = {

@@ -2,7 +2,7 @@ import unittest
 
 import numpy as np
 
-from app.calculations import STEP
+from app.calculations import IMPULSE, RECTANGLE, STEP
 from app.simulation import LEAN_GAS, RICH_ABSORBENT, run_simulation
 
 
@@ -26,6 +26,42 @@ DYNAMICS = {
 
 
 class SimulationTests(unittest.TestCase):
+    def test_small_time_constants_and_pid_converge_with_off_grid_delay(self):
+        dynamics = dict(DYNAMICS, time_constant=0.2, start_time=0.173,
+                        simulation_duration=3.0, delay=0.027)
+        controller = dict(controller_type="PID", controller_gain=0.5,
+                          integral_time=0.1, derivative_time=0.015,
+                          control_limit=0.3, setpoint=0.8)
+        coarse = run_simulation(LEAN_GAS, MODEL_VALUES, 0.1, 0.0, dynamics, controller)
+        fine = run_simulation(LEAN_GAS, MODEL_VALUES, 0.1, 0.0, dynamics, controller,
+                              max_step=np.min(np.diff(coarse["time"])) / 2)
+        interpolated = np.interp(coarse["time"], fine["time"], fine["final_response"])
+        np.testing.assert_allclose(coarse["final_response"], interpolated, atol=2e-4, rtol=0)
+
+    def test_short_rectangle_matches_analytical_peak_with_fractional_delay(self):
+        dynamics = dict(DYNAMICS, kind=RECTANGLE, start_time=10.05,
+                        effect_duration=0.05, delay=2.037)
+        result = run_simulation(LEAN_GAS, MODEL_VALUES, 0.1, 0.0, dynamics)
+        expected = 0.08 * (1.0 - np.exp(-0.05 / 10.0))
+        self.assertAlmostEqual(result["metrics"]["maximum_deviation"], expected, delta=1e-9)
+        self.assertTrue(np.all(result["final_response"][result["time"] <= 12.087] == 0.8))
+
+    def test_impulse_converges_when_step_is_halved(self):
+        dynamics = dict(DYNAMICS, kind=IMPULSE, start_time=0.123,
+                        effect_duration=0.05, time_constant=0.2, delay=0.017,
+                        simulation_duration=2.0)
+        results = [run_simulation(LEAN_GAS, MODEL_VALUES, 0.1, 0.0,
+                                  dynamics, max_step=step)
+                   for step in (0.001, 0.0005, 0.00025)]
+        peaks = [r["metrics"]["maximum_deviation"] for r in results]
+        self.assertLess(abs(peaks[1] - peaks[2]), abs(peaks[0] - peaks[2]))
+        self.assertAlmostEqual(peaks[1], peaks[2], delta=2e-5)
+
+    def test_excessive_resolution_is_rejected_before_allocation(self):
+        with self.assertRaisesRegex(ValueError, "расчётной сетки"):
+            run_simulation(LEAN_GAS, MODEL_VALUES, 0.1, 0.0,
+                           dict(DYNAMICS, time_constant=1e-9))
+
     def test_open_loop_contains_all_comparison_curves(self):
         result = run_simulation(
             LEAN_GAS,

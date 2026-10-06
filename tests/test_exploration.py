@@ -1,8 +1,10 @@
 import unittest
 
+import numpy as np
+
 from app.calculations import STEP
 from app.exploration import MAP_CATEGORIES, controller_setting_map, sensitivity_runs
-from app.simulation import LEAN_GAS
+from app.simulation import LEAN_GAS, run_simulation
 
 
 MODEL_VALUES = {
@@ -24,6 +26,17 @@ DYNAMICS = {
 
 
 class ExplorationTests(unittest.TestCase):
+    def test_map_cell_and_single_run_use_identical_resolution(self):
+        mapping = controller_setting_map(
+            LEAN_GAS, MODEL_VALUES, 0.1, 0.0, DYNAMICS,
+            "PID", (0.7,), (0.5,), 0.2, 0.8, derivative_time=0.03,
+        )
+        cell = mapping["results"][0][0]
+        single = run_simulation(LEAN_GAS, MODEL_VALUES, 0.1, 0.0,
+                                DYNAMICS, cell["controller"])
+        np.testing.assert_array_equal(cell["time"], single["time"])
+        np.testing.assert_array_equal(cell["final_response"], single["final_response"])
+
     def test_sensitivity_uses_each_selected_time_constant(self):
         runs = sensitivity_runs(
             LEAN_GAS, MODEL_VALUES, 0.0, 0.1, DYNAMICS, None,

@@ -144,6 +144,8 @@ def controller_response(
     control_limit,
     setpoint,
     delay=0.0,
+    *,
+    delayed_disturbance=None,
 ):
     """Simulate a first-order object controlled by a selected ideal controller."""
     time, disturbance_target = _validate_time_series(time, disturbance_target)
@@ -181,13 +183,13 @@ def controller_response(
     steps = np.diff(time)
     decays = np.exp(-steps / time_constant)
     delayed_times = time[:-1] - delay
-    delayed_disturbance = np.interp(
-        delayed_times,
-        time,
-        disturbance_target,
-        left=baseline,
-        right=disturbance_target[-1],
-    )
+    if delayed_disturbance is None:
+        delayed_disturbance = np.interp(
+            delayed_times, time, disturbance_target,
+            left=baseline, right=disturbance_target[-1],
+        )
+    else:
+        _time, delayed_disturbance = _validate_time_series(time, delayed_disturbance)
     delayed_control_indices = np.searchsorted(time, delayed_times, side="right") - 1
     delayed_control_weights = np.zeros_like(delayed_times)
     interpolated = (

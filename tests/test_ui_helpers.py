@@ -1,10 +1,23 @@
 import unittest
 
+import numpy as np
+
 from app.calculations import CONTROLLER_TYPES
-from ui.ui_helpers import DISTURBANCE_HELP, FORMULAS, ICON_PATTERNS
+from ui.ui_helpers import DISTURBANCE_HELP, FORMULAS, ICON_PATTERNS, plot_samples
 
 
 class UiResourceTests(unittest.TestCase):
+    def test_plot_sampling_preserves_a_short_pulse_and_full_input(self):
+        time = np.linspace(0, 100, 100001)
+        values = np.zeros_like(time)
+        values[10051:10055] = 1
+        shown_time, shown_values = plot_samples(time, values)
+        self.assertLessEqual(len(shown_time), 2000)
+        self.assertEqual(np.max(shown_values), 1)
+        self.assertEqual(shown_time[0], time[0])
+        self.assertEqual(shown_time[-1], time[-1])
+        self.assertEqual(len(values), 100001)
+
     def test_icons_are_sixteen_pixel_square_patterns(self):
         for name, pattern in ICON_PATTERNS.items():
             with self.subTest(icon=name):

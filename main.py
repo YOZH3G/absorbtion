@@ -55,6 +55,7 @@ from ui.ui_helpers import (
     ScrollablePage,
     TextTooltip,
     create_icon,
+    plot_samples,
 )
 
 
@@ -2152,8 +2153,7 @@ class AbsorptionApp(ttk.Frame):
         colors = ("#2563EB", "#F59E0B", "#16A34A", "#7C3AED", "#DB2777", "#0891B2")
         for index, run in enumerate(runs):
             self.disturbance_axis.plot(
-                run["time"],
-                run["response"],
+                *plot_samples(run["time"], run["response"]),
                 color=colors[index % len(colors)],
                 linewidth=2.2,
                 label=run["name"],
@@ -2654,14 +2654,15 @@ class AbsorptionApp(ttk.Frame):
             self._set_status("Исправьте значение", error=True)
             return
 
-        result = run_simulation(
-            self.chain,
-            self.model_values,
-            component_fraction,
-            flow_fraction,
-            dynamics,
-            controller,
-        )
+        try:
+            result = run_simulation(
+                self.chain, self.model_values, component_fraction,
+                flow_fraction, dynamics, controller,
+            )
+        except ValueError as error:
+            self.dynamics_error.set(str(error))
+            self._set_status(str(error), error=True)
+            return
         result["disturbance_type"] = self.disturbance_type.get()
 
         self.baseline_result.set(self._format_number(result["baseline"]))
@@ -2840,7 +2841,7 @@ class AbsorptionApp(ttk.Frame):
             suffix = "%" if parameter.startswith("Возмущение") else " с"
             shown_value = value * 100 if parameter.startswith("Возмущение") else value
             self.disturbance_axis.plot(
-                result["time"], result["final_response"], color=colors[index], linewidth=2.2,
+                *plot_samples(result["time"], result["final_response"]), color=colors[index], linewidth=2.2,
                 label=f"{shown_value:g}{suffix}",
             )
         self.disturbance_axis.margins(x=0.02, y=0.12)
@@ -2900,7 +2901,7 @@ class AbsorptionApp(ttk.Frame):
         else:
             row, column = self.map_selection
             result = self.map_data["results"][row][column]
-            self.response_axis.plot(result["time"], result["final_response"], color=ACCENT, linewidth=2.4, label="Выбранная настройка")
+            self.response_axis.plot(*plot_samples(result["time"], result["final_response"]), color=ACCENT, linewidth=2.4, label="Выбранная настройка")
             self.response_axis.axhline(result["controller"]["setpoint"], color=MUTED, linestyle="--", label="Задание")
             self._place_legend_above(self.response_axis)
             self.response_subtitle.set(self.map_selection_summary.get())
@@ -3015,9 +3016,9 @@ class AbsorptionApp(ttk.Frame):
 
         self._style_axis(self.disturbance_axis, "Время, с", "Относительное изменение")
         self.disturbance_axis.axhline(0.0, color=CURVE_STYLES["Исходный режим"][0], linestyle="--", linewidth=1.5, label="Исходный режим")
-        self.disturbance_axis.plot(time, component_signal, color=CURVE_STYLES["Только состав"][0], linewidth=2, label="Состав")
-        self.disturbance_axis.plot(time, flow_signal, color=CURVE_STYLES["Только расход"][0], linewidth=2, label="Расход")
-        self.disturbance_axis.plot(time, combined_signal, color=CURVE_STYLES["Совместное воздействие"][0], linewidth=2.4, label="Совместно")
+        self.disturbance_axis.plot(*plot_samples(time, component_signal), color=CURVE_STYLES["Только состав"][0], linewidth=2, label="Состав")
+        self.disturbance_axis.plot(*plot_samples(time, flow_signal), color=CURVE_STYLES["Только расход"][0], linewidth=2, label="Расход")
+        self.disturbance_axis.plot(*plot_samples(time, combined_signal), color=CURVE_STYLES["Совместное воздействие"][0], linewidth=2.4, label="Совместно")
         self._annotate_timing(self.disturbance_axis, dynamics)
         self.disturbance_axis.margins(x=0.02, y=0.15)
         self._place_legend_above(self.disturbance_axis)
@@ -3030,8 +3031,7 @@ class AbsorptionApp(ttk.Frame):
         for label, response in responses.items():
             color, linestyle = CURVE_STYLES[label]
             self.response_axis.plot(
-                time,
-                response,
+                *plot_samples(time, response),
                 color=color,
                 linestyle=linestyle,
                 linewidth=2.4 if label == "Совместное воздействие" else 1.8,
@@ -3049,8 +3049,7 @@ class AbsorptionApp(ttk.Frame):
         self.primary_chart_subtitle.set("Сигналы замкнутой системы")
         self._style_axis(self.disturbance_axis, "Время, с", "Ошибка e(t)")
         error_line = self.disturbance_axis.plot(
-            time,
-            error,
+            *plot_samples(time, error),
             color="#F59E0B",
             linewidth=2,
             label="Ошибка e(t)",
@@ -3060,8 +3059,7 @@ class AbsorptionApp(ttk.Frame):
 
         self.controller_signal_axis = self.disturbance_axis.twinx()
         control_line = self.controller_signal_axis.plot(
-            time,
-            control,
+            *plot_samples(time, control),
             color="#16A34A",
             linewidth=2,
             label="Воздействие u(t)",
@@ -3098,15 +3096,13 @@ class AbsorptionApp(ttk.Frame):
             label="Задание",
         )
         self.response_axis.plot(
-            time,
-            open_response,
+            *plot_samples(time, open_response),
             color="#F59E0B",
             linewidth=2,
             label="Без регулятора",
         )
         self.response_axis.plot(
-            time,
-            controlled_response,
+            *plot_samples(time, controlled_response),
             color=ACCENT,
             linewidth=2.4,
             label=f"{controller_type}-регулятор",

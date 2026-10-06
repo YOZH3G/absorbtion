@@ -105,7 +105,6 @@ def controller_setting_map(
                 flow_fraction,
                 dynamics,
                 controller,
-                point_count=301,
             )
             results[row][column] = result
             categories[row, column] = MAP_CATEGORY_CODES[classify_controller_result(result)]
