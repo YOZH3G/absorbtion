@@ -11,7 +11,7 @@ from matplotlib.colors import ListedColormap
 from matplotlib.figure import Figure
 
 APP_NAME = "Анализ процесса абсорбции"
-APP_VERSION = "1.5.1"
+APP_VERSION = "1.5.2"
 
 from app.calculations import (
     CONTROLLER_TYPES,
@@ -56,6 +56,7 @@ from app.simulation import LEAN_GAS, RICH_ABSORBENT, run_simulation, tune_balanc
 from app.validation import parse_fraction, parse_nonnegative_number, parse_positive_number, parse_percentage
 from ui.model_dialog import ModelParametersDialog
 from ui.scenario_editor import ScenarioEditorDialog
+from ui.window_geometry import fit_geometry, work_area
 from ui.ui_helpers import (
     DisturbanceTooltip,
     FormulaPanel,
@@ -84,6 +85,8 @@ DISTURBANCE_TYPES = {
     "Временное прямоугольное": RECTANGLE,
     "Плавно нарастающее": RAMP,
 }
+
+COMPARISON_COLORS = ("#2563EB", "#F59E0B", "#16A34A", "#7C3AED", "#DB2777", "#0891B2")
 
 CURVE_STYLES = {
     "Исходный режим": ("#667085", "--"),
@@ -240,6 +243,11 @@ class AbsorptionApp(ttk.Frame):
         self._task = None
         self._task_poll = None
         self._undo_clear = None
+        self.chart_mode = self.settings["chart_mode"]
+        self.chart_mode_label = tk.StringVar()
+        self.chart_cards = []
+        self._page_context = {}
+        self._layout_jobs = []
 
         self._configure_window()
         self._configure_styles()
@@ -267,8 +275,9 @@ class AbsorptionApp(ttk.Frame):
 
     def _configure_window(self):
         self.root.title(f"{APP_NAME} v{APP_VERSION}")
-        self.root.geometry(self.settings["geometry"])
-        self.root.minsize(1100, 680)
+        area = work_area(self.root)
+        self.root.geometry(fit_geometry(self.settings["geometry"], area))
+        self.root.minsize(min(900, area[2] - area[0] - 16), min(540, area[3] - area[1] - 48))
         self.root.configure(background=BACKGROUND)
         self.root.protocol("WM_DELETE_WINDOW", self._close_application)
         self.pack(fill="both", expand=True)
@@ -340,8 +349,7 @@ class AbsorptionApp(ttk.Frame):
         self.body = ttk.Frame(self, style="App.TFrame")
         self.body.grid(row=1, column=0, sticky="nsew")
         self.body.columnconfigure(0, minsize=220)
-        self.body.columnconfigure(1, minsize=390)
-        self.body.columnconfigure(2, weight=1)
+        self.body.columnconfigure(1, weight=1)
         self.body.rowconfigure(0, weight=1)
 
         self.sidebar = ttk.Frame(self.body, style="Sidebar.TFrame", padding=(12, 20))
@@ -403,8 +411,11 @@ class AbsorptionApp(ttk.Frame):
         )
         self.sidebar_toggle.grid(row=separator_row + 1, column=0, sticky="ew", pady=2)
 
-        inspector = ttk.Frame(self.body, style="App.TFrame", padding=(16, 16, 12, 12))
-        inspector.grid(row=0, column=1, sticky="nsew")
+        self.main_panes = ttk.Panedwindow(self.body, orient="horizontal")
+        self.main_panes.grid(row=0, column=1, sticky="nsew")
+        inspector = ttk.Frame(self.main_panes, style="App.TFrame", padding=(16, 16, 12, 12))
+        self.inspector = inspector
+        self.main_panes.add(inspector, weight=0)
         inspector.columnconfigure(0, weight=1)
         inspector.rowconfigure(1, weight=1)
         ttk.Label(inspector, textvariable=self.page_title, style="SectionHeader.TLabel").grid(row=0, column=0, sticky="w", pady=(0, 12))
@@ -435,7 +446,7 @@ class AbsorptionApp(ttk.Frame):
         self._build_control_diagram(self.page_contents["disturbances"])
         self._build_dynamics_card(self.page_contents["dynamics"])
         self._build_result_card(self.page_contents["results"])
-        self._build_comparison_card(self.page_contents["comparison"])
+        ttk.Label(self.page_contents["comparison"], text="Выберите опыты в широкой таблице над графиками. Пустой выбор показывает все опыты. Отчёты включают все закреплённые опыты.", wraplength=330, style="Body.TLabel").grid(row=0, column=0, sticky="w")
         self._build_controller_card(self.page_contents["controller"])
         self._build_sensitivity_card(self.page_contents["sensitivity"])
         self._build_tuning_map_card(self.page_contents["tuning_map"])
@@ -466,21 +477,40 @@ class AbsorptionApp(ttk.Frame):
         self.task_progress = ttk.Progressbar(actions, maximum=100)
         self.task_progress.grid(row=3, column=1, sticky="ew", padx=(6, 0), pady=(6, 0))
 
-        workspace = ttk.Frame(self.body, style="App.TFrame", padding=(4, 16, 16, 12))
-        workspace.grid(row=0, column=2, sticky="nsew")
+        workspace = ttk.Frame(self.main_panes, style="App.TFrame", padding=(4, 16, 16, 12))
+        self.workspace = workspace
+        self.main_panes.add(workspace, weight=1)
         workspace.columnconfigure(0, weight=1)
         workspace.rowconfigure(1, weight=1)
-        workspace.rowconfigure(2, weight=1)
         self._build_metric_strip(workspace)
+        self.comparison_workspace = ScrollablePage(workspace, background=BACKGROUND)
+        self.comparison_workspace.grid(row=2, column=0, sticky="ew")
+        self.comparison_workspace.columnconfigure(0, weight=1)
+        self._build_comparison_card(self.comparison_workspace.content)
+        self.comparison_workspace.bind_mousewheel()
+        self.comparison_workspace.canvas.configure(height=260)
+        self.comparison_workspace.grid_remove()
+        chart_actions = ttk.Frame(workspace, style="App.TFrame")
+        chart_actions.grid(row=1, column=0, sticky="ew", pady=(4, 4))
+        workspace.rowconfigure(1, weight=0)
+        workspace.rowconfigure(2, weight=0)
+        workspace.rowconfigure(3, weight=1)
+        self.chart_mode_box = ttk.Combobox(chart_actions, textvariable=self.chart_mode_label,
+                                         state="readonly", width=22)
+        self.chart_mode_box.pack(side="left")
+        self.chart_mode_box.bind("<<ComboboxSelected>>", self._choose_chart_mode)
+        ttk.Button(chart_actions, text="Исходная компоновка", command=self._reset_layout).pack(side="right")
+        self.chart_panes = ttk.Panedwindow(workspace, orient="vertical")
+        self.chart_panes.grid(row=3, column=0, sticky="nsew")
 
         self.disturbance_axis, self.disturbance_canvas, self.disturbance_toolbar = self._build_chart_card(
-            workspace,
+            self.chart_panes,
             row=1,
             title_variable=self.primary_chart_title,
             subtitle_variable=self.primary_chart_subtitle,
         )
         self.response_axis, self.response_canvas, self.response_toolbar = self._build_chart_card(
-            workspace,
+            self.chart_panes,
             row=2,
             title_variable=self.response_chart_title,
             subtitle_variable=self.response_subtitle,
@@ -496,9 +526,78 @@ class AbsorptionApp(ttk.Frame):
         self._apply_sidebar_state()
         initial_page = self.current_page if self.current_page in self.pages else "disturbances"
         self._show_page(initial_page)
+        self._set_chart_mode(self.chart_mode)
+        self._schedule_layout(self._restore_layout)
+        self.root.bind("<Configure>", self._adapt_window, add="+")
+
+    def _adapt_window(self, event):
+        if event.widget != self.root:
+            return
+        scale = float(self.root.tk.call("tk", "scaling")) / (96 / 72)
+        if event.width < 1240 * scale and not self.sidebar_collapsed:
+            self.sidebar_collapsed = True
+            self._apply_sidebar_state()
+        line_height = int(self.root.tk.call("font", "metrics", "TkDefaultFont", "-linespace")) + 4
+        ttk.Style(self.root).configure("Treeview", rowheight=line_height)
+        self.comparison_table.configure(height=max(3, min(6, int((event.height - 500 * scale) / line_height))))
+        self.comparison_workspace.canvas.configure(height=max(140, int((event.height - 140 * scale) * 0.43)))
+        if event.height < 850 * scale and self.chart_mode == "both" and self.current_page != "comparison":
+            self._set_chart_mode("response")
+
+    def _upper_chart_label(self):
+        if self.current_page in ("comparison", "sensitivity", "tuning_map"):
+            return {"comparison": "Сравнение", "sensitivity": "Чувствительность", "tuning_map": "Карта настроек"}[self.current_page]
+        return "Сигналы регулятора" if self.controller_enabled.get() else "Воздействие"
+
+    def _choose_chart_mode(self, _event=None):
+        label = self.chart_mode_label.get()
+        self._set_chart_mode("both" if label == "Оба" else "response" if label == "Отклик" else "input")
+
+    def _set_chart_mode(self, mode):
+        if len(self.chart_panes.panes()) == 2:
+            height = self.chart_panes.winfo_height()
+            if height > 1:
+                self.settings["chart_split"] = min(0.85, max(0.15, self.chart_panes.sashpos(0) / height))
+        self.chart_mode = mode
+        for card in self.chart_panes.panes():
+            self.chart_panes.forget(card)
+        for index in ((0, 1) if mode == "both" else (0,) if mode == "input" else (1,)):
+            self.chart_panes.add(self.chart_cards[index], weight=1)
+        self._refresh_chart_modes()
+        self.chart_mode_label.set("Оба" if mode == "both" else "Отклик" if mode == "response" else self._upper_chart_label())
+        if mode == "both":
+            self._schedule_layout(self._restore_chart_split)
+
+    def _refresh_chart_modes(self):
+        if hasattr(self, "chart_mode_box"):
+            self.chart_mode_box.configure(values=("Оба", self._upper_chart_label(), "Отклик"))
+            self.chart_mode_label.set("Оба" if self.chart_mode == "both" else "Отклик" if self.chart_mode == "response" else self._upper_chart_label())
+
+    def _schedule_layout(self, callback):
+        def apply():
+            self._layout_jobs.remove(job)
+            callback()
+        job = self.root.after_idle(apply)
+        self._layout_jobs.append(job)
+
+    def _restore_chart_split(self):
+        if len(self.chart_panes.panes()) == 2:
+            self.chart_panes.sashpos(0, int(self.chart_panes.winfo_height() * self.settings["chart_split"]))
+
+    def _restore_layout(self):
+        if len(self.main_panes.panes()) == 2:
+            self.main_panes.sashpos(0, min(self.settings["inspector_width"], max(300, self.main_panes.winfo_width() - 320)))
+        self._restore_chart_split()
+
+    def _reset_layout(self):
+        self.settings["inspector_width"], self.settings["chart_split"] = 410, 0.5
+        self._set_chart_mode("both")
+        self.settings["chart_split"] = 0.5
+        self._restore_layout()
 
     def _build_metric_strip(self, parent):
         metrics = ttk.Frame(parent, style="App.TFrame")
+        self.metric_strip = metrics
         metrics.grid(row=0, column=0, sticky="ew", pady=(0, 12))
         metrics.columnconfigure((0, 1, 2), weight=1)
         for column, (label, variable) in enumerate((
@@ -506,9 +605,9 @@ class AbsorptionApp(ttk.Frame):
             ("Суммарная доля", self.disturbance_result),
             ("Расчётное значение", self.calculated_result),
         )):
-            card = ttk.Frame(metrics, style="Card.TFrame", padding=(16, 12))
+            card = ttk.Frame(metrics, style="Card.TFrame", padding=(8, 10))
             card.grid(row=0, column=column, sticky="ew", padx=(0, 6) if column < 2 else 0)
-            ttk.Label(card, text=label, style="MetricTitle.TLabel").grid(row=0, column=0, sticky="w")
+            ttk.Label(card, text=label, style="MetricTitle.TLabel", wraplength=160).grid(row=0, column=0, sticky="w")
             ttk.Label(card, textvariable=variable, style="MetricValue.TLabel").grid(row=1, column=0, sticky="w", pady=(4, 0))
 
     def _show_page(self, page):
@@ -524,22 +623,48 @@ class AbsorptionApp(ttk.Frame):
             "export": "Экспорт результатов",
         }
         previous_page = self.current_page
+        if previous_page in self.pages and previous_page != page:
+            focus = self.root.focus_get()
+            self._page_context[previous_page] = (self.pages[previous_page].canvas.yview()[0],
+                focus if focus is not None and str(focus).startswith(str(self.pages[previous_page])) else None)
         self.current_page = page
         self.pages[page].tkraise()
-        self.pages[page].scroll_to_top()
+        if page in self._page_context:
+            scroll, focus = self._page_context[page]
+            self.pages[page].canvas.yview_moveto(scroll)
+            if focus is not None and focus.winfo_exists():
+                focus.focus_set()
         self.page_title.set(titles[page])
         for key, button in self.nav_buttons.items():
             button.configure(style="SelectedSidebarNav.TButton" if key == page else "SidebarNav.TButton")
+        if previous_page == "comparison" and page != "comparison":
+            if str(self.inspector) not in self.main_panes.panes():
+                self.main_panes.insert(0, self.inspector, weight=0)
+                self._schedule_layout(self._restore_layout)
+            self._set_chart_mode(getattr(self, "_comparison_chart_mode", "both"))
         if page == "comparison":
+            if str(self.inspector) in self.main_panes.panes():
+                self.settings["inspector_width"] = self.main_panes.sashpos(0)
+                self.main_panes.forget(self.inspector)
+            if previous_page != "comparison" or not hasattr(self, "_comparison_chart_mode"):
+                self._comparison_chart_mode = self.chart_mode
+                self._set_chart_mode("input")
+            self.comparison_workspace.grid()
+            self.metric_strip.grid_remove()
             self._draw_comparison()
-        elif page == "sensitivity":
+        else:
+            self.comparison_workspace.grid_remove()
+            self.metric_strip.grid()
+        if page == "sensitivity":
             self._draw_sensitivity()
         elif page == "tuning_map":
             self._draw_tuning_map()
-        elif previous_page in ("comparison", "sensitivity", "tuning_map") and self._charts_show_comparison:
+        elif page != "comparison" and previous_page in ("comparison", "sensitivity", "tuning_map") and self._charts_show_comparison:
             self._remove_map_colorbar()
             self._clear_map_click_callback()
             self._draw_last_calculation()
+
+        self._refresh_chart_modes()
 
     def _toggle_sidebar(self):
         self.sidebar_collapsed = not self.sidebar_collapsed
@@ -564,6 +689,7 @@ class AbsorptionApp(ttk.Frame):
             )
         self.sidebar_toggle.configure(
             text="»" if self.sidebar_collapsed else "«  Свернуть",
+            width=3 if self.sidebar_collapsed else 18,
         )
 
     def _card(self, parent, row, padding=(18, 16)):
@@ -1241,7 +1367,7 @@ class AbsorptionApp(ttk.Frame):
             card,
             textvariable=self.comparison_summary,
             style="Muted.TLabel",
-            wraplength=330,
+            wraplength=950,
         ).grid(row=1, column=0, sticky="w", pady=(0, 10))
 
         table_host = ttk.Frame(card, style="CardBody.TFrame")
@@ -1262,16 +1388,16 @@ class AbsorptionApp(ttk.Frame):
             columns=columns,
             show="headings",
             selectmode="extended",
-            height=10,
+            height=6,
         )
         headings = {
             "name": "Опыт",
-            "T": "T",
-            "L": "L",
-            "controller": "Рег.",
-            "deviation": "Δmax",
-            "settling": "tуст",
-            "error": "eуст",
+            "T": "T, с",
+            "L": "L, с",
+            "controller": "Регулятор",
+            "deviation": "Δmax, п.п.",
+            "settling": "tуст, с",
+            "error": "eуст, п.п.",
         }
         widths = {
             "name": 190,
@@ -1286,8 +1412,8 @@ class AbsorptionApp(ttk.Frame):
             self.comparison_table.heading(column, text=headings[column])
             self.comparison_table.column(
                 column,
-                width=widths[column],
-                minwidth=widths[column],
+                width=max(widths[column], int(self.root.tk.call("font", "measure", "TkDefaultFont", headings[column])) + 16),
+                minwidth=max(widths[column], int(self.root.tk.call("font", "measure", "TkDefaultFont", headings[column])) + 16),
                 anchor="w" if column == "name" else "center",
                 stretch=column == "name",
             )
@@ -1309,93 +1435,38 @@ class AbsorptionApp(ttk.Frame):
             xscrollcommand=horizontal.set,
         )
         self.comparison_table.bind("<<TreeviewSelect>>", lambda _event: self._draw_comparison())
-        ttk.Label(card, textvariable=self.comparison_details, style="Muted.TLabel",
-                  wraplength=330, justify="left").grid(row=4, column=0, sticky="w", pady=(12, 0))
+        details = ttk.Frame(card)
+        details.grid(row=4, column=0, sticky="ew", pady=(6, 0))
+        details.columnconfigure(0, weight=1)
+        self.comparison_details_text = tk.Text(details, height=2, width=1, wrap="word", font=("Segoe UI", 9), state="disabled")
+        self.comparison_details_text.grid(row=0, column=0, sticky="ew")
+        detail_scroll = ttk.Scrollbar(details, command=self.comparison_details_text.yview)
+        detail_scroll.grid(row=0, column=1, sticky="ns")
+        self.comparison_details_text.configure(yscrollcommand=detail_scroll.set)
+        self.comparison_details.trace_add("write", self._update_comparison_details)
 
         actions = ttk.Frame(card, style="CardBody.TFrame")
         actions.grid(row=3, column=0, sticky="ew", pady=(12, 0))
         actions.columnconfigure((0, 1), weight=1)
-        ttk.Button(
-            actions,
-            text="Показать все",
-            command=self._select_all_comparison_runs,
-            style="Secondary.TButton",
-        ).grid(row=0, column=0, sticky="ew", padx=(0, 4))
-        ttk.Button(
-            actions,
-            text="Удалить выбранные",
-            command=self._remove_comparison_runs,
-            style="Secondary.TButton",
-        ).grid(row=0, column=1, sticky="ew", padx=(4, 0))
-        ttk.Button(
-            actions,
-            text="Очистить",
-            command=self._clear_comparison_runs,
-            style="Secondary.TButton",
-        ).grid(row=1, column=0, sticky="ew", padx=(0, 4), pady=(8, 0))
-        ttk.Button(
-            actions,
-            text="Экспорт CSV",
-            command=self._export_comparison_csv,
-            style="Primary.TButton",
-        ).grid(row=1, column=1, sticky="ew", padx=(4, 0), pady=(8, 0))
-        ttk.Button(
-            actions,
-            text="Вернуть параметры",
-            command=self._restore_selected_comparison_run,
-            style="Secondary.TButton",
-        ).grid(row=2, column=0, sticky="ew", padx=(0, 4), pady=(8, 0))
-        ttk.Button(
-            actions,
-            text="Переименовать",
-            command=self._rename_comparison_run,
-            style="Secondary.TButton",
-        ).grid(row=2, column=1, sticky="ew", padx=(4, 0), pady=(8, 0))
-        ttk.Button(
-            actions,
-            text="Экспорт PNG",
-            command=self._export_comparison_graphs,
-            style="Secondary.TButton",
-        ).grid(row=3, column=0, sticky="ew", padx=(0, 4), pady=(8, 0))
-        ttk.Button(
-            actions,
-            text="Сохранить сеанс",
-            command=self._save_comparison_session,
-            style="Secondary.TButton",
-        ).grid(row=3, column=1, sticky="ew", padx=(4, 0), pady=(8, 0))
-        ttk.Button(
-            actions,
-            text="Открыть сеанс",
-            command=self._open_comparison_session,
-            style="Secondary.TButton",
-        ).grid(row=4, column=0, columnspan=2, sticky="ew", pady=(8, 0))
-        ttk.Button(
-            actions,
-            text="Отчёт HTML (все)",
-            command=self._save_comparison_html_report,
-            style="Secondary.TButton",
-        ).grid(row=5, column=0, sticky="ew", padx=(0, 4), pady=(8, 0))
-        ttk.Button(
-            actions,
-            text="Отчёт PDF (все)",
-            command=self._save_comparison_pdf_report,
-            style="Secondary.TButton",
-        ).grid(row=5, column=1, sticky="ew", padx=(4, 0), pady=(8, 0))
-
-        note = self._card(parent, 1)
-        ttk.Label(note, text="Как сравнивать", style="CardTitle.TLabel").grid(
-            row=0, column=0, sticky="w", pady=(0, 8)
-        )
-        ttk.Label(
-            note,
-            text=(
-                "Выберите один или несколько опытов в таблице. Верхний график показывает "
-                "переходные процессы, нижний — длительность установления. Максимум — шесть опытов."
-            ),
-            style="Body.TLabel",
-            wraplength=330,
-            justify="left",
-        ).grid(row=1, column=0, sticky="w")
+        for index, (label, command) in enumerate((
+            ("Показать все", self._select_all_comparison_runs),
+            ("Удалить выбранные", self._remove_comparison_runs),
+            ("Очистить", self._clear_comparison_runs),
+            ("Вернуть параметры", self._restore_selected_comparison_run),
+            ("Переименовать", self._rename_comparison_run),
+            ("Сохранить сеанс", self._save_comparison_session),
+            ("Открыть сеанс", self._open_comparison_session),
+        )):
+            ttk.Button(actions, text=label, command=command).grid(row=index // 4, column=index % 4,
+                sticky="ew", padx=3, pady=3)
+        actions.columnconfigure((0, 1, 2, 3), weight=1)
+        export_menu = tk.Menu(actions, tearoff=False)
+        for label, command in (("CSV выбранных", self._export_comparison_csv),
+                               ("PNG выбранных", self._export_comparison_graphs),
+                               ("HTML всех опытов", self._save_comparison_html_report),
+                               ("PDF всех опытов", self._save_comparison_pdf_report)):
+            export_menu.add_command(label=label, command=command)
+        ttk.Menubutton(actions, text="Экспорт", menu=export_menu).grid(row=1, column=3, sticky="ew", padx=3, pady=3)
 
     def _build_scenarios_card(self, parent):
         scenario_card = self._card(parent, 0)
@@ -1616,7 +1687,8 @@ class AbsorptionApp(ttk.Frame):
         subtitle_variable=None,
     ):
         card = ttk.Frame(parent, style="Card.TFrame", padding=(16, 12))
-        card.grid(row=row, column=0, sticky="nsew", pady=(0, 8) if row == 0 else (8, 0))
+        self.chart_cards.append(card)
+        parent.add(card, weight=1)
         card.columnconfigure(0, weight=1)
         card.rowconfigure(1, weight=1)
 
@@ -1624,11 +1696,11 @@ class AbsorptionApp(ttk.Frame):
         header.grid(row=0, column=0, sticky="ew", pady=(0, 6))
         header.columnconfigure(0, weight=1)
         if title_variable is not None:
-            ttk.Label(header, textvariable=title_variable, style="CardTitle.TLabel").grid(row=0, column=0, sticky="w")
+            ttk.Label(header, textvariable=title_variable, style="CardTitle.TLabel", wraplength=700).grid(row=0, column=0, columnspan=2, sticky="w")
         else:
             ttk.Label(header, text=title, style="CardTitle.TLabel").grid(row=0, column=0, sticky="w")
         if subtitle_variable is not None:
-            ttk.Label(header, textvariable=subtitle_variable, style="Muted.TLabel").grid(row=1, column=0, sticky="w", pady=(2, 0))
+            ttk.Label(header, textvariable=subtitle_variable, style="Muted.TLabel", wraplength=700).grid(row=1, column=0, columnspan=2, sticky="w", pady=(2, 0))
         else:
             ttk.Label(header, text=subtitle, style="Muted.TLabel").grid(row=1, column=0, sticky="w", pady=(2, 0))
 
@@ -1647,7 +1719,7 @@ class AbsorptionApp(ttk.Frame):
         toolbar.update()
 
         tools = ttk.Frame(header, style="CardBody.TFrame")
-        tools.grid(row=0, column=1, rowspan=2, sticky="e")
+        tools.grid(row=2, column=1, sticky="e")
         for column, (label, command) in enumerate((
             ("Сброс", toolbar.home),
             ("Zoom", toolbar.zoom),
@@ -1655,6 +1727,10 @@ class AbsorptionApp(ttk.Frame):
             ("PNG", toolbar.save_figure),
         )):
             ttk.Button(tools, text=label, command=command, style="Toolbar.TButton", width=7).grid(row=0, column=column, padx=(4, 0))
+        index = len(self.chart_cards) - 1
+        ttk.Button(header, text="Развернуть / вернуть", command=lambda: self._set_chart_mode(
+            "both" if self.chart_mode != "both" else "input" if index == 0 else "response"),
+            style="Toolbar.TButton").grid(row=2, column=0, sticky="w", pady=(4, 0))
 
         return axis, canvas, toolbar
 
@@ -1683,6 +1759,9 @@ class AbsorptionApp(ttk.Frame):
         self._cancel_task(announce=False)
         self._undo_clear = None
         self.undo_clear_button.configure(state="disabled")
+        self._page_context.clear()
+        for page in self.pages.values():
+            page.scroll_to_top()
         self.applied_scenario = copy.deepcopy(scenario)
         self.model_values = scenario["model_values"].copy()
         self.current_lesson = scenario["lesson"]
@@ -1767,6 +1846,13 @@ class AbsorptionApp(ttk.Frame):
             if not self.scenario_editor.request_close():
                 return
         self._cancel_task(announce=False)
+        for job in self._layout_jobs:
+            self.root.after_cancel(job)
+        self._layout_jobs.clear()
+        for canvas in (self.disturbance_canvas, self.response_canvas):
+            if canvas._idle_draw_id is not None:
+                canvas.get_tk_widget().after_cancel(canvas._idle_draw_id)
+                canvas._idle_draw_id = None
         self._save_autosave()
         if hasattr(self, "_autosave_job"):
             self.root.after_cancel(self._autosave_job)
@@ -1775,6 +1861,10 @@ class AbsorptionApp(ttk.Frame):
                 "geometry": self.root.geometry(),
                 "last_page": self.current_page,
                 "sidebar_collapsed": self.sidebar_collapsed,
+                "chart_mode": getattr(self, "_comparison_chart_mode", self.chart_mode) if self.current_page == "comparison" else self.chart_mode,
+                "inspector_width": self.main_panes.sashpos(0) if len(self.main_panes.panes()) == 2 else self.settings["inspector_width"],
+                "chart_split": self.chart_panes.sashpos(0) / max(1, self.chart_panes.winfo_height())
+                    if len(self.chart_panes.panes()) == 2 else self.settings["chart_split"],
             })
         except OSError:
             pass
@@ -1970,7 +2060,8 @@ class AbsorptionApp(ttk.Frame):
 
     def _refresh_comparison_table(self, selected_ids=()):
         self.comparison_table.delete(*self.comparison_table.get_children())
-        for run in self.comparison_runs:
+        for index, run in enumerate(self.comparison_runs):
+            self.comparison_table.tag_configure(run["id"], foreground=COMPARISON_COLORS[index % 6])
             settling = (
                 "—"
                 if run["settling_duration"] is None
@@ -1980,8 +2071,9 @@ class AbsorptionApp(ttk.Frame):
                 "",
                 "end",
                 iid=run["id"],
+                tags=(run["id"],),
                 values=(
-                    run["name"],
+                    "● " + run["name"],
                     self._format_number(run["time_constant"]),
                     self._format_number(run["delay"]),
                     run["controller_type"],
@@ -2450,6 +2542,16 @@ class AbsorptionApp(ttk.Frame):
             self._clear_result_values()
             self._draw_static_charts()
 
+    def _comparison_color(self, run):
+        index = next(index for index, stored in enumerate(self.comparison_runs) if stored["id"] == run["id"])
+        return COMPARISON_COLORS[index % len(COMPARISON_COLORS)]
+
+    def _update_comparison_details(self, *_):
+        self.comparison_details_text.configure(state="normal")
+        self.comparison_details_text.delete("1.0", "end")
+        self.comparison_details_text.insert("1.0", self.comparison_details.get())
+        self.comparison_details_text.configure(state="disabled")
+
     def _draw_comparison(self):
         if not hasattr(self, "comparison_table") or self.current_page != "comparison":
             return
@@ -2465,14 +2567,13 @@ class AbsorptionApp(ttk.Frame):
         self._remove_controller_axis()
         self.primary_chart_title.set("Сравнение переходных процессов")
         self.primary_chart_subtitle.set("Закреплённые расчёты на одном графике")
-        self._style_axis(self.disturbance_axis, "Время, с", "Концентрация, %")
-        colors = ("#2563EB", "#F59E0B", "#16A34A", "#7C3AED", "#DB2777", "#0891B2")
+        self._style_axis(self.disturbance_axis, "Время, с", "X, %")
         for index, run in enumerate(runs):
             self.disturbance_axis.plot(
                 *plot_samples(run["time"], run["response"] * 100),
-                color=colors[index % len(colors)],
+                color=self._comparison_color(run),
                 linewidth=2.2,
-                label=run["name"],
+                label=run["name"].split(":", 1)[0],
             )
         if runs:
             self._place_legend_above(self.disturbance_axis)
@@ -2501,7 +2602,7 @@ class AbsorptionApp(ttk.Frame):
         bars = self.response_axis.bar(
             positions,
             values,
-            color=[colors[index % len(colors)] for index in range(len(runs))],
+            color=[self._comparison_color(run) for run in runs],
             alpha=0.85,
         )
         self.response_axis.set_xticks(positions)
@@ -2670,6 +2771,7 @@ class AbsorptionApp(ttk.Frame):
         return float(absorption_balance(**self.model_values)["xog" if self.chain == LEAN_GAS else "xna"])
 
     def _update_controller_type(self, _event=None):
+        self._refresh_chart_modes()
         controller_type = self.controller_type.get()
         self.controller_settings_title.set(f"Настройки {controller_type}-регулятора")
         self.controller_on_text.set(f"С {controller_type}-регулятором")
@@ -3035,7 +3137,8 @@ class AbsorptionApp(ttk.Frame):
             f"отклонение {result['metrics']['maximum_deviation']:.4g} · {settling_summary}"
         )
         self.calculate_button_text.set("Пересчитать")
-        self._show_page("scenarios" if prediction is not None else "results")
+        if self.learning_mode.get():
+            self._show_page("scenarios" if prediction is not None else "results")
         self._set_status("Расчёт выполнен")
 
     def _update_calculation_steps(
@@ -3196,7 +3299,7 @@ class AbsorptionApp(ttk.Frame):
         colors = ("#2563EB", "#F59E0B", "#16A34A", "#7C3AED", "#DB2777", "#0891B2")
         self.primary_chart_title.set("Анализ чувствительности")
         self.primary_chart_subtitle.set(f"Семейство кривых по параметру: {parameter}")
-        self._style_axis(self.disturbance_axis, "Время, с", "Концентрация, %")
+        self._style_axis(self.disturbance_axis, "Время, с", "X, %")
         for index, run in enumerate(runs):
             result = run["result"]
             value = run["value"]
@@ -3260,7 +3363,7 @@ class AbsorptionApp(ttk.Frame):
     def _draw_map_selection_response(self):
         self.response_chart_title.set("Переходный процесс выбранной точки")
         self.response_subtitle.set("Выберите ячейку карты")
-        self._style_axis(self.response_axis, "Время, с", "Концентрация, %")
+        self._style_axis(self.response_axis, "Время, с", "X, %")
         if self.map_selection is None:
             self.response_axis.text(0.5, 0.5, "Ячейка не выбрана", transform=self.response_axis.transAxes, ha="center", va="center", color=MUTED)
         else:
@@ -3393,7 +3496,7 @@ class AbsorptionApp(ttk.Frame):
 
     def _draw_response(self, time, responses, dynamics=None, metrics=None):
         self.response_chart_title.set("Кривая разгона")
-        self._style_axis(self.response_axis, "Время, с", "Концентрация, %")
+        self._style_axis(self.response_axis, "Время, с", "X, %")
         for label, response in responses.items():
             color, linestyle = CURVE_STYLES[label]
             self.response_axis.plot(
@@ -3453,7 +3556,7 @@ class AbsorptionApp(ttk.Frame):
         metrics=None,
     ):
         self.response_chart_title.set(f"Без регулятора / {controller_type}-регулятор")
-        self._style_axis(self.response_axis, "Время, с", "Концентрация, %")
+        self._style_axis(self.response_axis, "Время, с", "X, %")
         self.response_axis.axhline(
             setpoint * 100,
             color=MUTED,

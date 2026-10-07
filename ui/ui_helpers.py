@@ -439,6 +439,9 @@ class ScrollablePage(ttk.Frame):
         self.scrollbar = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
         self.scrollbar.grid(row=0, column=1, sticky="ns")
         self.canvas.configure(yscrollcommand=self.scrollbar.set)
+        self.horizontal_scrollbar = ttk.Scrollbar(self, orient="horizontal", command=self.canvas.xview)
+        self.horizontal_scrollbar.grid(row=1, column=0, sticky="ew")
+        self.canvas.configure(xscrollcommand=self.horizontal_scrollbar.set)
         self.content = ttk.Frame(self.canvas, style="App.TFrame")
         self.content.columnconfigure(0, weight=1)
         self._window_id = self.canvas.create_window(
@@ -462,11 +465,16 @@ class ScrollablePage(ttk.Frame):
         self._update_scroll_state()
 
     def _fit_content_width(self, event):
-        self.canvas.itemconfigure(self._window_id, width=event.width)
+        self.canvas.itemconfigure(self._window_id, width=max(event.width, self.content.winfo_reqwidth()))
         self._update_scroll_state()
 
     def _update_scroll_state(self):
         bounds = self.canvas.bbox("all")
+        if bounds is not None and bounds[2] - bounds[0] > self.canvas.winfo_width():
+            self.horizontal_scrollbar.grid()
+        else:
+            self.horizontal_scrollbar.grid_remove()
+            self.canvas.xview_moveto(0.0)
         content_height = 0 if bounds is None else bounds[3] - bounds[1]
         should_scroll = content_height > self.canvas.winfo_height()
         if should_scroll == self._scrolling_enabled:
@@ -483,8 +491,11 @@ class ScrollablePage(ttk.Frame):
         if not self._scrolling_enabled:
             return
         self.canvas.yview_scroll(int(-event.delta / 120), "units")
+        return "break"
 
     def _bind_descendants(self, widget):
+        if isinstance(widget, (tk.Text, tk.Listbox, ttk.Treeview, ttk.Combobox)):
+            return
         widget.bind("<MouseWheel>", self._on_mousewheel, add="+")
         for child in widget.winfo_children():
             self._bind_descendants(child)

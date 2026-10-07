@@ -7,6 +7,7 @@ from app.validation import parse_percentage, parse_nonnegative_number
 from app.laboratory import FASTEST_OPTIONS
 from .model_dialog import ModelParametersDialog
 from .ui_helpers import ScrollablePage
+from .window_geometry import fit_geometry, work_area
 from app.scenario_store import CHAINS, DISTURBANCE_TYPES, normalize_scenario
 
 
@@ -85,8 +86,9 @@ class ScenarioEditorDialog(tk.Toplevel):
         self._loaded_lesson_texts = {}
 
         self.title("Редактор лабораторных сценариев")
-        self.geometry("1180x780")
-        self.minsize(1040, 700)
+        self.geometry(fit_geometry("1180x780", work_area(self)))
+        area = work_area(self)
+        self.minsize(min(900, area[2] - area[0] - 16), min(540, area[3] - area[1] - 48))
         self.configure(background=background)
         self.transient(parent)
         self._build_content()
@@ -103,7 +105,7 @@ class ScenarioEditorDialog(tk.Toplevel):
         content = ttk.Frame(self, style="App.TFrame", padding=18)
         content.pack(fill="both", expand=True)
         content.columnconfigure(1, weight=1)
-        content.rowconfigure(1, weight=1)
+        content.rowconfigure(2, weight=1)
 
         ttk.Label(content, text="Редактор лабораторных сценариев", style="Header.TLabel").grid(
             row=0, column=0, columnspan=2, sticky="w"
@@ -112,10 +114,10 @@ class ScenarioEditorDialog(tk.Toplevel):
             content,
             text="Встроенные сценарии защищены. Чтобы изменить такой сценарий, сначала создайте его копию.",
             style="Status.TLabel",
-        ).grid(row=0, column=1, sticky="e")
+        ).grid(row=1, column=0, columnspan=2, sticky="w")
 
         list_card = ttk.Frame(content, style="Card.TFrame", padding=(12, 12))
-        list_card.grid(row=1, column=0, sticky="nsew", pady=(14, 0), padx=(0, 12))
+        list_card.grid(row=2, column=0, sticky="nsew", pady=(14, 0), padx=(0, 12))
         list_card.rowconfigure(4, weight=1)
         list_card.columnconfigure(0, weight=1)
         ttk.Label(list_card, text="Сценарии", style="CardTitle.TLabel").grid(
@@ -216,7 +218,7 @@ class ScenarioEditorDialog(tk.Toplevel):
         ).grid(row=6, column=0, sticky="w", pady=(10, 0))
 
         form = ttk.Frame(content, style="Card.TFrame", padding=(16, 14))
-        form.grid(row=1, column=1, sticky="nsew", pady=(14, 0))
+        form.grid(row=2, column=1, sticky="nsew", pady=(14, 0))
         form.columnconfigure((0, 1), weight=1)
         form.rowconfigure(1, weight=1)
         ttk.Label(form, text="Параметры сценария", style="CardTitle.TLabel").grid(
@@ -228,21 +230,18 @@ class ScenarioEditorDialog(tk.Toplevel):
 
         notebook = ttk.Notebook(form)
         notebook.grid(row=1, column=0, columnspan=2, sticky="nsew")
-        general = ttk.Frame(notebook, style="CardBody.TFrame", padding=16)
-        dynamics = ttk.Frame(notebook, style="CardBody.TFrame", padding=16)
-        controller = ttk.Frame(notebook, style="CardBody.TFrame", padding=16)
-        lesson_page = ScrollablePage(notebook, background=self.cget("background"))
-        lesson = ttk.Frame(lesson_page.content, style="CardBody.TFrame", padding=16)
-        lesson.grid(row=0, column=0, sticky="ew")
-        notebook.add(general, text="Сценарий")
-        notebook.add(dynamics, text="Динамика")
-        notebook.add(controller, text="Регулятор и задание")
-        notebook.add(lesson_page, text="Учебное задание")
-        self._build_general_tab(general)
-        self._build_dynamics_tab(dynamics)
-        self._build_controller_tab(controller)
-        self._build_lesson_tab(lesson)
-        lesson_page.bind_mousewheel()
+        self._tab_pages = []
+        for title, build in (("Сценарий", self._build_general_tab),
+                             ("Динамика", self._build_dynamics_tab),
+                             ("Регулятор и задание", self._build_controller_tab),
+                             ("Учебное задание", self._build_lesson_tab)):
+            page = ScrollablePage(notebook, background=self.cget("background"))
+            tab = ttk.Frame(page.content, style="CardBody.TFrame", padding=16)
+            tab.grid(row=0, column=0, sticky="ew")
+            notebook.add(page, text=title)
+            build(tab)
+            page.bind_mousewheel()
+            self._tab_pages.append(page)
 
         ttk.Label(
             form,
@@ -1037,7 +1036,7 @@ class ScenarioEditorDialog(tk.Toplevel):
         self.update_idletasks()
         x = parent.winfo_rootx() + (parent.winfo_width() - self.winfo_width()) // 2
         y = parent.winfo_rooty() + (parent.winfo_height() - self.winfo_height()) // 2
-        self.geometry(f"+{max(x, 0)}+{max(y, 0)}")
+        self.geometry(fit_geometry(f"{self.winfo_width()}x{self.winfo_height()}{x:+d}{y:+d}", work_area(self)))
         self.lift()
         self.focus_force()
 

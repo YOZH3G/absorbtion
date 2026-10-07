@@ -3,6 +3,8 @@ from tkinter import ttk
 
 from app.validation import parse_percentage, parse_positive_number
 from app.calculations import absorption_balance
+from .ui_helpers import ScrollablePage
+from .window_geometry import fit_geometry, work_area
 
 
 class ModelParametersDialog(tk.Toplevel):
@@ -33,7 +35,9 @@ class ModelParametersDialog(tk.Toplevel):
 
         self.title("Параметры математической модели")
         self.configure(background=background)
-        self.resizable(False, False)
+        self.resizable(True, True)
+        self.columnconfigure(0, weight=1)
+        self.rowconfigure(0, weight=1)
         self.transient(parent)
         self._build_content()
         self._bind_events()
@@ -41,8 +45,11 @@ class ModelParametersDialog(tk.Toplevel):
         self._center(parent)
 
     def _build_content(self):
-        content = ttk.Frame(self, style="App.TFrame", padding=20)
-        content.pack(fill="both", expand=True)
+        page = ScrollablePage(self, self.cget("background"))
+        self._scroll_page = page
+        page.grid(row=0, column=0, sticky="nsew")
+        content = ttk.Frame(page.content, style="App.TFrame", padding=20)
+        content.grid(row=0, column=0, sticky="nsew")
         content.columnconfigure((0, 1), weight=1)
 
         ttk.Label(content, text="Параметры математической модели", style="Header.TLabel").grid(
@@ -88,8 +95,8 @@ class ModelParametersDialog(tk.Toplevel):
         ttk.Label(derived, textvariable=self._balance_error, style="Error.TLabel", wraplength=560).grid(row=6, column=0, columnspan=4, sticky="w")
         ttk.Label(derived, text="Условная степень извлечения; равновесие и кинетика массопередачи не рассчитываются", style="Muted.TLabel", wraplength=560).grid(row=7, column=0, columnspan=4, sticky="w")
 
-        actions = ttk.Frame(content, style="App.TFrame")
-        actions.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(18, 0))
+        actions = ttk.Frame(self, style="App.TFrame", padding=12)
+        actions.grid(row=1, column=0, sticky="ew")
         actions.columnconfigure(1, weight=1)
         ttk.Button(
             actions,
@@ -110,6 +117,10 @@ class ModelParametersDialog(tk.Toplevel):
             style="Primary.TButton",
         )
         self._apply_button.grid(row=0, column=3)
+        page.bind_mousewheel()
+        self.update_idletasks()
+        area = work_area(self)
+        self.minsize(min(actions.winfo_reqwidth(), area[2] - area[0] - 16), min(360, area[3] - area[1] - 48))
 
     def _build_parameter_group(self, parent, column, title, specs):
         group = ttk.Frame(parent, style="Card.TFrame", padding=(16, 14))
@@ -191,9 +202,11 @@ class ModelParametersDialog(tk.Toplevel):
 
     def _center(self, parent):
         self.update_idletasks()
-        x = parent.winfo_rootx() + (parent.winfo_width() - self.winfo_reqwidth()) // 2
-        y = parent.winfo_rooty() + (parent.winfo_height() - self.winfo_reqheight()) // 2
-        self.geometry(f"+{max(x, 0)}+{max(y, 0)}")
+        width = self._scroll_page.content.winfo_reqwidth() + 24
+        height = self._scroll_page.content.winfo_reqheight() + 100
+        x = parent.winfo_rootx() + (parent.winfo_width() - width) // 2
+        y = parent.winfo_rooty() + (parent.winfo_height() - height) // 2
+        self.geometry(fit_geometry(f"{width}x{height}{x:+d}{y:+d}", work_area(self)))
         self.grab_set()
         self.lift()
         self.focus_force()

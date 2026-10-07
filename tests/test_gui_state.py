@@ -240,6 +240,72 @@ class GuiStateTests(unittest.TestCase):
         self.root.update()
         self.assertEqual(applied, ["new"])
 
+    def test_chart_layout_preserves_result_and_restores_saved_mode(self):
+        app = self.app
+        original = app.last_calculation
+        app._set_chart_mode("response")
+        self.root.update_idletasks()
+        self.assertEqual(len(app.chart_panes.panes()), 1)
+        self.assertIs(app.last_calculation, original)
+        app._set_chart_mode("both")
+        self.root.update_idletasks()
+        self.assertEqual(len(app.chart_panes.panes()), 2)
+        app._set_chart_mode("response")
+        app._close_application()
+        self.root = tk.Tk()
+        self.root.withdraw()
+        with patch.object(main, "ScenarioStore", return_value=self.store):
+            self.app = main.AbsorptionApp(self.root)
+        self.root.update_idletasks()
+        self.assertEqual(self.app.chart_mode, "response")
+        self.assertEqual(len(self.app.chart_panes.panes()), 1)
+
+    def test_comparison_reopen_restores_previous_chart_mode(self):
+        app = self.app
+        app._set_chart_mode("response")
+        app._show_page("comparison")
+        app._close_application()
+        self.root = tk.Tk()
+        self.root.withdraw()
+        with patch.object(main, "ScenarioStore", return_value=self.store):
+            self.app = main.AbsorptionApp(self.root)
+        self.root.update_idletasks()
+        self.assertEqual(self.app.current_page, "comparison")
+        self.assertEqual(self.app.chart_mode, "input")
+        self.app._show_page("disturbances")
+        self.assertEqual(self.app.chart_mode, "response")
+
+    def test_free_calculation_preserves_page_and_navigation_preserves_scroll(self):
+        app = self.app
+        app._show_page("controller")
+        self.root.update_idletasks()
+        page = app.pages["controller"]
+        page.canvas.yview_moveto(0.5)
+        expected = page.canvas.yview()[0]
+        app._show_page("dynamics")
+        app._show_page("controller")
+        self.root.update_idletasks()
+        self.assertAlmostEqual(page.canvas.yview()[0], expected, places=2)
+        app._calculate()
+        self.wait_for_task()
+        self.assertEqual(app.current_page, "controller")
+
+    def test_comparison_selection_retains_curve_colour_and_has_wide_table(self):
+        app = self.app
+        app._add_current_to_comparison()
+        app._add_current_to_comparison()
+        self.root.update_idletasks()
+        second = app.comparison_runs[1]
+        app.comparison_table.selection_set(second["id"])
+        app._draw_comparison()
+        self.assertEqual(app.disturbance_axis.lines[0].get_color(), app._comparison_color(second))
+        self.assertEqual(str(app.comparison_table.tag_configure(second["id"], "foreground")), app._comparison_color(second))
+        self.root.deiconify()
+        self.root.geometry("1366x768")
+        self.root.update()
+        self.assertGreater(app.comparison_table.winfo_width(), 545)
+        self.assertGreater(app.chart_panes.winfo_height(), 250)
+
     def tearDown(self):
         if hasattr(self, "root"):
             self.root.update_idletasks()
@@ -305,7 +371,7 @@ class GuiStateTests(unittest.TestCase):
             self.assertEqual(title, result["title"])
             self.assertEqual(lesson, result["lesson"])
             self.assertEqual(kwargs["prediction"], result["prediction"])
-            self.assertEqual(self.app.response_axis.get_ylabel(), "Концентрация, %")
+            self.assertEqual(self.app.response_axis.get_ylabel(), "X, %")
             return Path(path)
 
         with patch.object(main.filedialog, "asksaveasfilename", return_value=str(Path(self.directory.name) / "report.html")):

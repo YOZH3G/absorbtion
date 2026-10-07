@@ -8,6 +8,9 @@ DEFAULT_SETTINGS = {
     "geometry": "1600x1000",
     "last_page": "disturbances",
     "sidebar_collapsed": False,
+    "chart_mode": "both",
+    "inspector_width": 410,
+    "chart_split": 0.5,
 }
 GEOMETRY_PATTERN = re.compile(r"^\d+x\d+(?:[+-]\d+[+-]\d+)?$")
 
@@ -33,6 +36,14 @@ class SettingsStore:
         collapsed = payload.get("sidebar_collapsed")
         if isinstance(collapsed, bool):
             settings["sidebar_collapsed"] = collapsed
+        if payload.get("chart_mode") in ("both", "input", "response"):
+            settings["chart_mode"] = payload["chart_mode"]
+        width = payload.get("inspector_width")
+        if isinstance(width, int) and not isinstance(width, bool) and 300 <= width <= 1000:
+            settings["inspector_width"] = width
+        split = payload.get("chart_split")
+        if isinstance(split, (int, float)) and not isinstance(split, bool) and 0.15 <= split <= 0.85:
+            settings["chart_split"] = split
         return settings
 
     def save(self, settings):
@@ -41,6 +52,9 @@ class SettingsStore:
             "geometry": settings["geometry"],
             "last_page": settings["last_page"],
             "sidebar_collapsed": bool(settings["sidebar_collapsed"]),
+            "chart_mode": settings.get("chart_mode", "both"),
+            "inspector_width": settings.get("inspector_width", 410),
+            "chart_split": settings.get("chart_split", 0.5),
         }
         self.path.parent.mkdir(parents=True, exist_ok=True)
         temporary_path = self.path.with_suffix(self.path.suffix + ".tmp")

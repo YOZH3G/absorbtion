@@ -22,6 +22,7 @@ class SettingsStoreTests(unittest.TestCase):
     def test_settings_round_trip(self):
         store = SettingsStore(self.path)
         expected = {
+            **DEFAULT_SETTINGS,
             "geometry": "1280x720+20+30",
             "last_page": "comparison",
             "sidebar_collapsed": True,
