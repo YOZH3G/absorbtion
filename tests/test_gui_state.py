@@ -7,11 +7,26 @@ from unittest.mock import patch
 
 import main
 from app.scenario_store import ScenarioStore
+from app.exploration import controller_setting_map
 from app.simulation import RICH_ABSORBENT
 from ui.scenario_editor import ScenarioEditorDialog
 
 
 class GuiStateTests(unittest.TestCase):
+    def test_map_selection_explains_independent_observations(self):
+        from types import SimpleNamespace
+        result = self.app.last_calculation
+        self.app.map_data = controller_setting_map(
+            result["chain"], result["model_values"], result["component_fraction"],
+            result["flow_fraction"], result["dynamics"], "PI", (6,), (2,), 1, 0.8,
+        )
+        self.app._show_page("tuning_map")
+        self.app._select_map_cell(SimpleNamespace(inaxes=self.app.disturbance_axis, xdata=0, ydata=0))
+        description = self.app.map_selection_summary.get()
+        self.assertIn("Насыщение η", description)
+        self.assertIn("Вывод относится только к длительности этого опыта", description)
+        self.assertEqual(self.app.map_selection, (0, 0))
+
     def setUp(self):
         try:
             self.root = tk.Tk()

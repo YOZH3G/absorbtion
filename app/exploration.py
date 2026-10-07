@@ -15,10 +15,10 @@ SENSITIVITY_PARAMETERS = (
 )
 
 MAP_CATEGORIES = (
-    "Устойчиво",
-    "Колебания",
-    "Не установилось",
-    "Ограничение управления",
+    "Установилось за время опыта",
+    "Затухающие колебания",
+    "Незатухающие колебания",
+    "Установление не подтверждено",
 )
 MAP_CATEGORY_CODES = {category: index for index, category in enumerate(MAP_CATEGORIES)}
 
@@ -88,6 +88,7 @@ def controller_setting_map(
     rows = (None,) if controller_type == "P" else tuple(integral_times)
     categories = np.empty((len(rows), len(gains)), dtype=int)
     results = [[None for _gain in gains] for _row in rows]
+    assessments = [[None for _gain in gains] for _row in rows]
     for row, integral_time in enumerate(rows):
         for column, gain in enumerate(gains):
             controller = {
@@ -107,7 +108,9 @@ def controller_setting_map(
                 controller,
             )
             results[row][column] = result
-            categories[row, column] = MAP_CATEGORY_CODES[classify_controller_result(result)]
+            assessment = assess_controller_result(result)
+            assessments[row][column] = assessment
+            categories[row, column] = MAP_CATEGORY_CODES[assessment["category"]]
     return {
         "controller_type": controller_type,
         "gains": tuple(gains),
@@ -115,33 +118,62 @@ def controller_setting_map(
         "derivative_time": derivative_time if controller_type == "PID" else None,
         "categories": categories,
         "results": results,
+        "assessments": assessments,
     }
 
 
 def classify_controller_result(result):
-    """Categorize a simulation for the simplified educational map."""
+    """Return the primary map colour; independent features remain in the assessment."""
+    return assess_controller_result(result)["category"]
+
+
+def assess_controller_result(result):
+    """Describe observations on the finite horizon without claiming analytic stability."""
     response = np.asarray(result["final_response"], dtype=float)
     metrics = result["metrics"]
-    if not np.all(np.isfinite(response)):
-        return "Не установилось"
     start_index = int(np.searchsorted(result["time"], result["response_start"], side="left"))
-    if start_index >= response.size:
-        return "Не установилось"
-    deviation = response[start_index:] - metrics["steady_state"]
-    scale = max(float(np.max(np.abs(deviation))), abs(metrics["initial_value"] - metrics["steady_state"]), 1e-6)
-    significant = deviation[np.abs(deviation) > 0.02 * scale]
-    crossings = int(np.count_nonzero(np.diff(np.signbit(significant))))
-    if metrics["settling_time"] is None:
-        return "Колебания" if crossings >= 2 else "Не установилось"
-    if crossings >= 3:
-        return "Колебания"
-    control = result["control"]
+    oscillation = "Колебания не выявлены"
+    ratio = None
+    if np.all(np.isfinite(response)) and start_index < response.size:
+        deviation = response[start_index:] - metrics["steady_state"]
+        scale = max(float(np.max(np.abs(deviation))),
+                    abs(metrics["initial_value"] - metrics["steady_state"]), 1e-12)
+        significant = deviation[np.abs(deviation) > 0.02 * scale]
+        boundaries = np.flatnonzero(np.diff(np.signbit(significant))) + 1
+        if len(boundaries) >= 2:
+            # Exclude the first and last lobes: the horizon can cut either one short.
+            peaks = [float(np.max(np.abs(lobe))) for lobe in np.split(significant, boundaries)[1:-1]]
+            if len(peaks) < 2:
+                oscillation = "Колебания: недостаточно циклов для оценки затухания"
+            else:
+                ratio = peaks[-1] / peaks[0]
+                oscillation = ("Затухающие колебания" if ratio < 0.8 else
+                               "Растущие колебания" if ratio > 1.2 else "Незатухающие колебания")
+    else:
+        oscillation = "Недостаточно данных для оценки колебаний"
+    saturated = False
+    saturation_duration = 0.0
     controller = result["controller"]
     if controller is not None:
+        control = np.asarray(result["control"], dtype=float)
         eta = result["model_values"]["eta"]
         low = max(0.0, eta - controller["control_limit"])
         high = min(1.0, eta + controller["control_limit"])
-        if np.any(np.isclose(control, low, rtol=0.0, atol=1e-8)
-                  | np.isclose(control, high, rtol=0.0, atol=1e-8)):
-            return "Ограничение управления"
-    return "Устойчиво"
+        at_limit = (np.isclose(control, low, rtol=0.0, atol=1e-8)
+                    | np.isclose(control, high, rtol=0.0, atol=1e-8))
+        saturated = bool(np.any(at_limit))
+        saturation_duration = float(np.sum(np.diff(result["time"])[at_limit[:-1]]))
+    settled = metrics["settling_time"] is not None and bool(np.all(np.isfinite(response)))
+    category = (MAP_CATEGORIES[0] if settled else MAP_CATEGORIES[1]
+                if oscillation == "Затухающие колебания" else MAP_CATEGORIES[2]
+                if oscillation in ("Растущие колебания", "Незатухающие колебания") else MAP_CATEGORIES[3])
+    status = metrics.get("settling_status", "Установилось за время опыта" if settled
+                         else "Установление не подтверждено")
+    explanation = f"{status}. {oscillation}. "
+    if ratio is not None:
+        explanation += f"Отношение последней полной амплитуды к первой: {ratio:.3g}. "
+    explanation += (f"Насыщение η: {saturation_duration:.3g} с. " if saturated else "Насыщение η не выявлено. ")
+    explanation += "Вывод относится только к длительности этого опыта."
+    return {"category": category, "settled": settled, "oscillation": oscillation,
+            "amplitude_ratio": ratio, "saturated": saturated,
+            "saturation_duration": saturation_duration, "explanation": explanation}

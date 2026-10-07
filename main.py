@@ -8,7 +8,7 @@ from matplotlib.colors import ListedColormap
 from matplotlib.figure import Figure
 
 APP_NAME = "Анализ процесса абсорбции"
-APP_VERSION = "1.5.1"
+APP_VERSION = "1.5.2"
 
 from app.calculations import (
     CONTROLLER_TYPES,
@@ -2972,7 +2972,10 @@ class AbsorptionApp(ttk.Frame):
         self.map_colorbar = self.disturbance_axis.figure.colorbar(
             image, ax=self.disturbance_axis, ticks=range(len(MAP_CATEGORIES)), pad=0.02
         )
-        self.map_colorbar.ax.set_yticklabels(MAP_CATEGORIES)
+        self.map_colorbar.ax.set_yticklabels(
+            ("Установилось\nза время опыта", "Затухающие\nколебания",
+             "Незатухающие\nколебания", "Установление\nне подтверждено"), fontsize=8,
+        )
         self._ensure_map_click_callback()
         self.disturbance_canvas.draw_idle()
         self._draw_map_selection_response()
@@ -3030,7 +3033,8 @@ class AbsorptionApp(ttk.Frame):
             settings += f", Ti={integral_time:.3g} с"
         if self.map_data["derivative_time"] is not None:
             settings += f", Td={self.map_data['derivative_time']:.3g} с"
-        self.map_selection_summary.set(f"{settings}. Категория: {category}.")
+        assessment = self.map_data["assessments"][row][column]
+        self.map_selection_summary.set(f"{settings}. Категория: {category}.\n{assessment['explanation']}")
         self.apply_map_selection_button.configure(state="normal")
         self._draw_tuning_map()
 
