@@ -6,7 +6,8 @@ from pathlib import Path
 
 import numpy as np
 
-from app.session_store import read_session, write_session
+from app.session_store import read_laboratory_session, read_session, validate_input_state, write_session
+from unittest.mock import patch
 
 
 def run():
@@ -24,11 +25,73 @@ def run():
         "relative_deviation": 1.25,
         "settling_duration": 8.0,
         "static_error": 0.0,
-        "input_state": {"chain": "lean_gas", "start_time": "10"},
+        "input_state": input_state(),
     }
 
 
+def input_state():
+    return {"chain": "lean_gas", "model_version": 2, "model_values": DEFAULT_MODEL_VALUES.copy(),
+            "component_enabled": True, "flow_enabled": False, "controller_enabled": False,
+            "component_value": "0.1", "flow_value": "", "disturbance_type": "Ступенчатое",
+            "start_time": "10", "simulation_duration": "100", "effect_duration": "1",
+            "time_constant": "10", "delay": "2", "controller_type": "PI",
+            "proportional_gain": "2", "integral_time": "20", "derivative_time": "1",
+            "control_limit": "100", "setpoint": "16.6667"}
+
+
 class SessionStoreTests(unittest.TestCase):
+    def test_interrupted_replacement_preserves_last_correct_file_and_backup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "session.json"
+            write_session(path, [run()], 3)
+            first = path.read_bytes()
+            changed = run() | {"name": "Новый опыт"}
+            write_session(path, [changed], 3)
+            second = path.read_bytes()
+            self.assertEqual(path.with_suffix(".json.bak").read_bytes(), first)
+            original_replace = Path.replace
+
+            def interrupted(source, target):
+                if Path(target) == path:
+                    raise OSError("Interrupted write")
+                return original_replace(source, target)
+
+            with patch.object(Path, "replace", interrupted), self.assertRaises(OSError):
+                write_session(path, [run()], 3)
+            self.assertEqual(path.read_bytes(), second)
+            self.assertEqual(path.with_suffix(".json.bak").read_bytes(), second)
+            self.assertFalse(path.with_suffix(".json.tmp").exists())
+
+    def test_corrupt_import_and_invalid_nested_values_are_rejected(self):
+        for updates in ({"time": [0, 0]}, {"response": [0.1, 1.1]}, {"delay": -1},
+                        {"chain": "unknown"}, {"input_state": input_state() | {"simulation_duration": "-2"}},
+                        {"model_values": dict(DEFAULT_MODEL_VALUES, gg={})}):
+            with self.subTest(updates=updates), tempfile.TemporaryDirectory() as directory:
+                candidate = run() | updates
+                candidate["time"] = np.asarray(candidate["time"]).tolist()
+                candidate["response"] = np.asarray(candidate["response"]).tolist()
+                path = Path(directory) / "bad.json"
+                path.write_text(json.dumps({"version": 2, "runs": [candidate]}), encoding="utf-8")
+                with self.assertRaises(ValueError):
+                    read_session(path)
+
+    def test_draft_can_preserve_unfinished_input_but_calculation_cannot(self):
+        state = input_state() | {"component_value": "-", "time_constant": ""}
+        self.assertEqual(validate_input_state(state, draft=True), state)
+        with self.assertRaises(ValueError):
+            validate_input_state(state)
+
+    def test_existing_model_two_session_without_laboratory_is_readable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "comparison.json"
+            write_session(path, [run()], 3)
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            del payload["laboratory"]
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            _runs, counter, laboratory = read_laboratory_session(path)
+            self.assertEqual(counter, 3)
+            self.assertIsNone(laboratory)
+
     def test_round_trip_preserves_arrays_and_input_state(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "lesson.absession.json"

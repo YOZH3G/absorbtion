@@ -7,12 +7,118 @@ from unittest.mock import patch
 
 import main
 from app.scenario_store import ScenarioStore
+from app.session_store import read_laboratory_session, restore_calculation, write_session
 from app.exploration import controller_setting_map
 from app.simulation import RICH_ABSORBENT
 from ui.scenario_editor import ScenarioEditorDialog
 
 
 class GuiStateTests(unittest.TestCase):
+    def test_foreign_scenario_and_optional_prediction_restore_without_replacing_signal(self):
+        import json
+        import numpy as np
+        app = self.app
+        original = app.last_calculation["final_response"].copy()
+        laboratory = app._capture_laboratory()
+        laboratory["scenario"]["name"] = "Сценарий другого компьютера"
+        laboratory["scenario_name"] = laboratory["scenario"]["name"]
+        del laboratory["last_calculation"]["prediction"]
+        laboratory["last_calculation"]["final_response"] = "invalid"
+        path = Path(self.directory.name) / "foreign.json"
+        path.write_text(json.dumps({"version": 2, "comparison_counter": 0, "runs": [],
+                                    "laboratory": laboratory}), encoding="utf-8")
+        runs, counter, restored = read_laboratory_session(path)
+        result = restore_calculation(restored["last_calculation"])
+        app.comparison_runs, app.comparison_counter = runs, counter
+        app._restore_laboratory(restored, result)
+        self.assertIn("Сценарий другого компьютера", app.scenarios_by_name)
+        self.assertEqual(app.selected_scenario.get(), "Сценарий другого компьютера")
+        self.assertIsNone(app.last_prediction)
+        np.testing.assert_array_equal(app.last_calculation["final_response"], original)
+
+    def test_new_window_automatically_restores_saved_laboratory(self):
+        import numpy as np
+        original = self.app.last_calculation["final_response"].copy()
+        self.app.student_conclusion.set("Восстановлено после запуска")
+        self.app.component_value.set("-")
+        self.app._close_application()
+        self.root = tk.Tk()
+        self.root.withdraw()
+        with patch.object(main, "ScenarioStore", return_value=self.store):
+            self.app = main.AbsorptionApp(self.root)
+        self.assertEqual(self.app.student_conclusion.get(), "Восстановлено после запуска")
+        self.assertEqual(self.app.component_value.get(), "-")
+        np.testing.assert_array_equal(self.app.last_calculation["final_response"], original)
+        self.assertIn("автосохранения", self.app.status_text.get())
+
+    def test_full_laboratory_restores_draft_result_and_assignment_without_using_attempt(self):
+        import numpy as np
+        app = self.app
+        app.current_lesson["attempt_limit"] = 3
+        app.assignment_enabled.set(True)
+        app.predicted_direction.set("Уменьшится")
+        app.predicted_fastest.set("Без сравнения")
+        app.predicted_correction.set("Регулятор выключен")
+        app.predicted_steady.set("26.27")
+        app._calculate()
+        original = app.last_calculation
+        app._add_current_to_comparison()
+        app.learning_mode.set(True)
+        app.learning_step = 4
+        app.student_name.set("Студент")
+        app.student_conclusion.set("Проверен баланс")
+        app.component_value.set("-")
+        app.predicted_steady.set("26,")
+        path = Path(self.directory.name) / "laboratory.json"
+        write_session(path, app.comparison_runs, app.comparison_counter, app._capture_laboratory())
+        runs, counter, laboratory = read_laboratory_session(path)
+        result = restore_calculation(laboratory["last_calculation"])
+        app._reset()
+        app.student_name.set("")
+        app.assignment_attempts = 0
+        app.comparison_runs, app.comparison_counter = runs, counter
+        app._restore_laboratory(laboratory, result)
+        np.testing.assert_array_equal(app.last_calculation["final_response"], original["final_response"])
+        np.testing.assert_array_equal(app.last_calculation["time"], original["time"])
+        self.assertEqual(app.component_value.get(), "-")
+        self.assertEqual(app.predicted_steady.get(), "26,")
+        self.assertEqual(app.assignment_attempts, 1)
+        self.assertEqual(app.assignment_evaluation, original["evaluation"])
+        self.assertEqual(app.learning_step, 4)
+        self.assertEqual(app.student_name.get(), "Студент")
+        self.assertEqual(app.student_conclusion.get(), "Проверен баланс")
+
+    def test_broken_nested_import_does_not_change_current_work(self):
+        import json
+        app = self.app
+        path = Path(self.directory.name) / "broken.json"
+        write_session(path, [], 0, app._capture_laboratory())
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        del payload["laboratory"]["last_calculation"]["input_state"]["delay"]
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        result, form = app.last_calculation, app._capture_input_state()
+        with patch.object(main.filedialog, "askopenfilename", return_value=str(path)):
+            app._open_comparison_session()
+        self.assertIs(app.last_calculation, result)
+        self.assertEqual(app._capture_input_state(), form)
+
+    def test_autosave_recovers_backup_and_preserves_corrupt_copy(self):
+        app = self.app
+        app.student_conclusion.set("Первая корректная копия")
+        app._save_autosave()
+        app.student_conclusion.set("Вторая копия")
+        app._save_autosave()
+        app.autosave_path.write_text("broken", encoding="utf-8")
+        app.student_conclusion.set("")
+        app._restore_autosave()
+        self.assertEqual(app.student_conclusion.get(), "Первая корректная копия")
+        self.assertEqual(app.autosave_path.with_suffix(".json.corrupt").read_text(encoding="utf-8"), "broken")
+        self.assertIn("резервного", app.status_text.get())
+        app.autosave_path.unlink()
+        app.student_conclusion.set("")
+        app._restore_autosave()
+        self.assertEqual(app.student_conclusion.get(), "Первая корректная копия")
+
     def test_map_selection_explains_independent_observations(self):
         from types import SimpleNamespace
         result = self.app.last_calculation

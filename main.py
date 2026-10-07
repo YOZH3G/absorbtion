@@ -1,4 +1,7 @@
 import copy
+import json
+import shutil
+import sys
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
@@ -8,7 +11,7 @@ from matplotlib.colors import ListedColormap
 from matplotlib.figure import Figure
 
 APP_NAME = "Анализ процесса абсорбции"
-APP_VERSION = "1.5.2"
+APP_VERSION = "1.5.0"
 
 from app.calculations import (
     CONTROLLER_TYPES,
@@ -45,7 +48,7 @@ from app.laboratory import (
     evaluate_prediction,
 )
 from app.scenario_store import ScenarioStore
-from app.session_store import read_session, write_session
+from app.session_store import read_laboratory_session, restore_calculation, validate_input_state, write_session
 from app.settings_store import SettingsStore
 from app.plotting import adaptive_legend
 from app.simulation import LEAN_GAS, RICH_ABSORBENT, run_simulation, tune_balanced_controller
@@ -92,14 +95,14 @@ CURVE_STYLES = {
 
 
 class AbsorptionApp(ttk.Frame):
-    def __init__(self, root):
+    def __init__(self, root, scenario_path=None):
         super().__init__(root, style="App.TFrame")
         self.root = root
         self.chain = LEAN_GAS
         self.model_values = DEFAULT_MODEL_VALUES.copy()
         self.model_dialog = None
         self.scenario_editor = None
-        self.scenario_store = ScenarioStore()
+        self.scenario_store = ScenarioStore(scenario_path) if scenario_path is not None else ScenarioStore()
         self.settings_store = SettingsStore(
             self.scenario_store.path.with_name("settings.json")
         )
@@ -183,6 +186,7 @@ class AbsorptionApp(ttk.Frame):
         self.assignment_tolerance_percent = 5.0
         self.assignment_absolute_tolerance = 1e-6
         self.current_lesson = self.scenarios[0]["lesson"]
+        self.applied_scenario = copy.deepcopy(self.scenarios[0])
         self.assignment_attempts = 0
         self.assignment_evaluation = None
         self.learning_mode = tk.BooleanVar(value=False)
@@ -246,6 +250,10 @@ class AbsorptionApp(ttk.Frame):
             variable.trace_add("write", self._mark_result_stale)
         if self.scenario_store.warning:
             self._set_status(self.scenario_store.warning, error=True)
+        self.autosave_path = self.scenario_store.path.with_name("laboratory.autosave.json")
+        self._autosave_signature = None
+        self._restore_autosave()
+        self._autosave_job = self.root.after(5000, self._autosave_tick)
 
     def _configure_window(self):
         self.root.title(f"{APP_NAME} v{APP_VERSION}")
@@ -1574,6 +1582,7 @@ class AbsorptionApp(ttk.Frame):
             self._apply_scenario_data(scenario)
 
     def _apply_scenario_data(self, scenario, variant_number=None):
+        self.applied_scenario = copy.deepcopy(scenario)
         self.model_values = scenario["model_values"].copy()
         self.current_lesson = scenario["lesson"]
         self.assignment_attempts = 0
@@ -1656,6 +1665,9 @@ class AbsorptionApp(ttk.Frame):
         if self.scenario_editor is not None and self.scenario_editor.winfo_exists():
             if not self.scenario_editor.request_close():
                 return
+        self._save_autosave()
+        if hasattr(self, "_autosave_job"):
+            self.root.after_cancel(self._autosave_job)
         try:
             self.settings_store.save({
                 "geometry": self.root.geometry(),
@@ -2050,9 +2062,6 @@ class AbsorptionApp(ttk.Frame):
         self._show_page("disturbances")
 
     def _save_comparison_session(self):
-        if not self.comparison_runs:
-            self._set_status("Нет опытов для сохранения сеанса", error=True)
-            return
         selected = filedialog.asksaveasfilename(
             parent=self.root,
             title="Сохранить учебный сеанс",
@@ -2063,7 +2072,7 @@ class AbsorptionApp(ttk.Frame):
         if not selected:
             return
         try:
-            path = write_session(selected, self.comparison_runs, self.comparison_counter)
+            path = write_session(selected, self.comparison_runs, self.comparison_counter, self._capture_laboratory())
         except (OSError, ValueError, TypeError) as error:
             self._set_status(f"Не удалось сохранить сеанс: {error}", error=True)
             return
@@ -2084,7 +2093,8 @@ class AbsorptionApp(ttk.Frame):
         if not selected:
             return
         try:
-            runs, counter = read_session(selected)
+            runs, counter, laboratory = read_laboratory_session(selected)
+            result = restore_calculation(laboratory["last_calculation"]) if laboratory is not None else None
         except (OSError, ValueError) as error:
             self._set_status(str(error), error=True)
             return
@@ -2096,6 +2106,10 @@ class AbsorptionApp(ttk.Frame):
             return
         self.comparison_runs = runs
         self.comparison_counter = counter
+        if laboratory is not None:
+            self._restore_laboratory(laboratory, result)
+            self._set_status(f"Лабораторная восстановлена: {len(runs)} закреплённых опытов")
+            return
         selected_ids = tuple(run["id"] for run in runs)
         self._refresh_comparison_table(selected_ids)
         self._draw_comparison()
@@ -2103,6 +2117,131 @@ class AbsorptionApp(ttk.Frame):
 
     def _export_comparison_graphs(self):
         self._export_graphs_png()
+
+    def _capture_laboratory(self):
+        calculation = self.last_calculation
+        snapshot = None if calculation is None else {
+            key: copy.deepcopy(calculation[key])
+            for key in ("input_state", "title", "lesson", "prediction", "evaluation")
+        }
+        return {
+            "input_state": self._capture_input_state(), "scenario": copy.deepcopy(self.applied_scenario),
+            "lesson": copy.deepcopy(self.current_lesson), "scenario_name": self.selected_scenario.get(),
+            "variant": int(self.selected_variant.get()), "active_scenario": self.active_scenario.get(),
+            "learning_mode": self.learning_mode.get(), "learning_step": self.learning_step,
+            "assignment_enabled": self.assignment_enabled.get(), "attempts": self.assignment_attempts,
+            "steady_tolerance_percent": self.assignment_tolerance_percent,
+            "steady_absolute_tolerance": self.assignment_absolute_tolerance,
+            "prediction_fields": {"direction": self.predicted_direction.get(), "steady": self.predicted_steady.get(),
+                                  "fastest": self.predicted_fastest.get(), "correction": self.predicted_correction.get()},
+            "evaluation": copy.deepcopy(self.assignment_evaluation), "student_name": self.student_name.get(),
+            "conclusion": self.student_conclusion.get(), "page": self.current_page,
+            "selected_runs": list(self.comparison_table.selection()), "last_calculation": snapshot,
+        }
+
+    def _restore_laboratory(self, laboratory, result):
+        scenario = laboratory["scenario"]
+        if scenario["name"] not in self.scenarios_by_name:
+            self.scenarios = (*self.scenarios, copy.deepcopy(scenario))
+            self.scenarios_by_name[scenario["name"]] = self.scenarios[-1]
+            self.scenario_box.configure(values=tuple(self.scenarios_by_name))
+        self.applied_scenario = copy.deepcopy(scenario)
+        selected_name = laboratory["scenario_name"]
+        self.selected_scenario.set(selected_name if selected_name in self.scenarios_by_name else scenario["name"])
+        self.selected_variant.set(str(laboratory["variant"]))
+        self._update_scenario_description()
+        self.current_lesson = laboratory["lesson"]
+        self.assignment_tolerance_percent = laboratory["steady_tolerance_percent"]
+        self.assignment_absolute_tolerance = laboratory["steady_absolute_tolerance"]
+        self.learning_mode.set(laboratory["learning_mode"])
+        self.learning_step = laboratory["learning_step"]
+        self.assignment_enabled.set(laboratory["assignment_enabled"])
+        self._update_assignment_states()
+        self.assignment_attempts = laboratory["attempts"]
+        self.assignment_evaluation = laboratory["evaluation"]
+        self.student_name.set(laboratory["student_name"])
+        self.student_conclusion.set(laboratory["conclusion"])
+        for key, variable in (("direction", self.predicted_direction), ("steady", self.predicted_steady),
+                              ("fastest", self.predicted_fastest), ("correction", self.predicted_correction)):
+            variable.set(laboratory["prediction_fields"][key])
+        self.last_calculation = result
+        self.last_prediction = None if result is None else copy.deepcopy(result["prediction"])
+        if result is None:
+            self._clear_result_values()
+        else:
+            self._restore_input_state(result["input_state"], preserve_result=True)
+            self.baseline_result.set(self._format_number(result["baseline"] * 100) + "%")
+            self.disturbance_result.set(f"{self._format_number(result['combined_fraction'])} ({result['combined_fraction'] * 100:+.1f}%)")
+            self.calculated_result.set(self._format_number(result["calculated"] * 100) + "%")
+            self.final_result.set(self._format_number(result["final_response"][-1] * 100) + "%")
+            self.result_mode.set(result["result_mode"])
+            self._update_calculation_steps(result["component_fraction"], result["flow_fraction"],
+                                           result["combined_fraction"], result["baseline"], result["calculated"])
+            self._update_transition_metrics(result["metrics"], result["dynamics"], result["response_start"])
+            self._draw_calculation_result(result)
+            self.add_comparison_button.configure(state="normal")
+            for button in self.export_buttons:
+                button.configure(state="normal")
+        self._restore_input_state(laboratory["input_state"], draft=True, preserve_result=True)
+        if result is None:
+            self._draw_static_charts()
+        self.active_scenario.set(laboratory["active_scenario"])
+        self._update_lesson_summary()
+        self._update_learning_route()
+        evaluation = self.assignment_evaluation
+        if evaluation is not None:
+            self.assignment_feedback.set(f"Результат: {evaluation['score']} из {evaluation['total']}.\n"
+                                         + "\n".join(evaluation["lines"])
+                                         + f"\nОсталось попыток: {self.current_lesson['attempt_limit'] - self.assignment_attempts}.")
+        self._refresh_comparison_table(laboratory["selected_runs"])
+        self._show_page(laboratory["page"])
+        self._mark_result_stale()
+        self.calculate_button_text.set("Проверить прогноз" if self.assignment_enabled.get()
+                                       else "Пересчитать" if result is not None else "Рассчитать")
+
+    def _save_autosave(self):
+        try:
+            laboratory = self._capture_laboratory()
+            signature = json.dumps((laboratory, [(run["id"], run["name"]) for run in self.comparison_runs],
+                                    self.comparison_counter), ensure_ascii=False, sort_keys=True)
+            if signature != self._autosave_signature:
+                write_session(self.autosave_path, self.comparison_runs, self.comparison_counter, laboratory)
+                self._autosave_signature = signature
+        except (OSError, ValueError, TypeError) as error:
+            self._set_status(f"Не удалось автоматически сохранить лабораторную: {error}", error=True)
+
+    def _autosave_tick(self):
+        self._save_autosave()
+        self._autosave_job = self.root.after(5000, self._autosave_tick)
+
+    def _restore_autosave(self):
+        backup = self.autosave_path.with_suffix(".json.bak")
+        if not self.autosave_path.exists() and not backup.exists():
+            return
+        warning = None
+        for path in (self.autosave_path, backup):
+            try:
+                runs, counter, laboratory = read_laboratory_session(path)
+                result = restore_calculation(laboratory["last_calculation"]) if laboratory is not None else None
+            except (OSError, ValueError) as error:
+                warning = f"Автосохранение повреждено: {error}"
+                if path == self.autosave_path:
+                    try:
+                        shutil.copyfile(path, path.with_suffix(".json.corrupt"))
+                    except OSError:
+                        pass
+                continue
+            self.comparison_runs, self.comparison_counter = runs, counter
+            if laboratory is not None:
+                self._restore_laboratory(laboratory, result)
+            else:
+                self._refresh_comparison_table()
+            if path != self.autosave_path:
+                self._set_status("Лабораторная восстановлена из резервного автосохранения")
+            else:
+                self._set_status("Лабораторная восстановлена из автосохранения")
+            return
+        self._set_status(warning or "Не удалось восстановить лабораторную", error=True)
 
     def _mark_result_stale(self, *_):
         if self.last_calculation is None or "input_state" not in self.last_calculation:
@@ -2161,7 +2300,8 @@ class AbsorptionApp(ttk.Frame):
             "setpoint": self.setpoint.get(),
         }
 
-    def _restore_input_state(self, state):
+    def _restore_input_state(self, state, *, draft=False, preserve_result=False):
+        validate_input_state(state, draft=draft)
         if state["chain"] not in (LEAN_GAS, RICH_ABSORBENT):
             raise ValueError("неизвестная цепь управления")
         if state.get("model_version") != 2:
@@ -2198,9 +2338,10 @@ class AbsorptionApp(ttk.Frame):
         self._update_controller_type()
         self._update_disturbance_type()
         self._update_input_states()
-        self._clear_result_values()
         self._draw_control_diagram()
-        self._draw_static_charts()
+        if not preserve_result:
+            self._clear_result_values()
+            self._draw_static_charts()
 
     def _draw_comparison(self):
         if not hasattr(self, "comparison_table") or self.current_page != "comparison":
@@ -3363,7 +3504,54 @@ class AbsorptionApp(ttk.Frame):
         return f"1 {sign} {abs(fraction):.2f}"
 
 
+def _run_release_check(output_path):
+    from pathlib import Path
+    import tempfile
+    report = {"version": APP_VERSION, "frozen": bool(getattr(sys, "frozen", False)), "status": "failed"}
+    root = None
+    try:
+        with tempfile.TemporaryDirectory(prefix="absorption-release-") as directory:
+            scenario_path = Path(directory) / "scenarios.json"
+            root = tk.Tk()
+            root.withdraw()
+            app = AbsorptionApp(root, scenario_path)
+            for scenario in app.scenarios:
+                app._apply_scenario_data(scenario)
+                app._calculate()
+                if app.last_calculation is None:
+                    raise RuntimeError(app.status_text.get())
+            report["builtin_scenarios"] = len(app.scenarios)
+            expected = app.last_calculation["final_response"].copy()
+            app.student_conclusion.set("Проверка восстановления релиза")
+            app._save_autosave()
+            if not app.autosave_path.exists():
+                raise RuntimeError(app.status_text.get())
+            app._close_application()
+            root = None
+            root = tk.Tk()
+            root.withdraw()
+            app = AbsorptionApp(root, scenario_path)
+            if (app.last_calculation is None
+                    or not np.array_equal(expected, app.last_calculation["final_response"])
+                    or app.student_conclusion.get() != "Проверка восстановления релиза"):
+                raise RuntimeError("Не удалось точно восстановить расчёт и пользовательские данные.")
+            app._close_application()
+            root = None
+            report.update(status="passed", gui_started=True, autosave_restored=True)
+    except Exception as error:
+        report["error"] = str(error)
+    finally:
+        if root is not None:
+            root.destroy()
+    destination = Path(output_path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return 0 if report["status"] == "passed" else 1
+
+
 def main():
+    if len(sys.argv) == 3 and sys.argv[1] == "--smoke-test":
+        raise SystemExit(_run_release_check(sys.argv[2]))
     root = tk.Tk()
     AbsorptionApp(root)
     root.mainloop()

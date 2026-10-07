@@ -1,11 +1,29 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+import sys
+from pathlib import Path
+from zipfile import ZipFile
+
+from PyInstaller.utils.hooks.tcl_tk import tcltk_info
+
+
+data_files = [("data/builtin_scenarios.json", "data")]
+if sys.platform == "win32" and tcltk_info.tcl_data_dir.startswith("//zipfs:"):
+    # Tcl/Tk 9 keeps its scripts in external archives, missed by the hook.
+    for library, target in (("tcl", "_tcl_data"), ("tk", "_tk_data")):
+        archives = list((Path(sys.base_prefix) / "tcl").glob(f"lib{library}*.zip"))
+        if len(archives) != 1:
+            raise RuntimeError(f"Expected one {library} script archive: {archives}")
+        destination = Path("build") / "tk_scripts" / library
+        with ZipFile(archives[0]) as archive:
+            archive.extractall(destination)
+        data_files.append((str(destination / f"{library}_library"), target))
 
 analysis = Analysis(
     ["main.py"],
     pathex=[],
     binaries=[],
-    datas=[("data/builtin_scenarios.json", "data")],
+    datas=data_files,
     hiddenimports=["matplotlib.backends.backend_tkagg"],
     hookspath=[],
     hooksconfig={},
