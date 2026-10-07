@@ -79,6 +79,14 @@ def _deserialize_run(run):
     restored["relative_deviation"] = None if relative is None else _finite_number(relative, "relative_deviation")
     settling = run.get("settling_duration")
     restored["settling_duration"] = None if settling is None else _finite_number(settling, "settling_duration")
+    for key in ("steady_state", "final_error", "iae", "saturation_duration"):
+        value = run.get(key)
+        restored[key] = None if value is None else _finite_number(value, key)
+    restored["final_value"] = float(restored["response"][-1])
+    status = run.get("settling_status", "Нет сохранённых данных об установлении")
+    if not isinstance(status, str) or not status.strip():
+        raise ValueError("Опыт: статус установления должен быть непустым текстом.")
+    restored["settling_status"] = status
     input_state = run.get("input_state")
     if input_state is not None and not isinstance(input_state, dict):
         raise ValueError("Опыт: input_state должен быть объектом JSON.")

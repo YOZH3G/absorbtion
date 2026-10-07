@@ -230,10 +230,12 @@ def normalize_scenario(scenario):
         "Допуск прогноза",
         minimum=0.0,
         maximum=100.0,
-        strict=True,
+        strict=False,
     )
 
     controller = _normalize_controller(scenario.get("controller"))
+    absolute_tolerance = _number(scenario.get("steady_absolute_tolerance", 1e-6),
+                                 "Абсолютный допуск прогноза", minimum=0, maximum=1)
     disturbed = dict(model_values)
     disturbed["xg" if chain == "lean_gas" else "xa"] *= 1 + (component or 0)
     disturbed["gg" if chain == "lean_gas" else "ga"] *= 1 + (flow or 0)
@@ -259,6 +261,7 @@ def normalize_scenario(scenario):
         "delay": delay,
         "controller": controller,
         "steady_tolerance_percent": tolerance,
+        "steady_absolute_tolerance": absolute_tolerance,
         "lesson": lesson,
     }
 

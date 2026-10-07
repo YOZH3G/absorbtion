@@ -31,6 +31,12 @@ def build_comparison_run(result, name, input_state=None):
         "static_error": float(metrics["static_error"]),
         "model_version": result["model_version"],
         "model_values": copy.deepcopy(result["model_values"]),
+        "steady_state": metrics.get("steady_state"),
+        "final_value": float(result["final_response"][-1]),
+        "final_error": metrics.get("final_error"),
+        "settling_status": metrics.get("settling_status", "Установление не подтверждено"),
+        "iae": metrics.get("iae"),
+        "saturation_duration": metrics.get("saturation_duration"),
     }
     if input_state is not None:
         run["input_state"] = copy.deepcopy(input_state)
@@ -54,6 +60,12 @@ def write_comparison_csv(path, runs):
             "Относительное отклонение, %",
             "Длительность установления, с",
             "Статическая ошибка, доля",
+            "Теоретический режим, доля",
+            "В конце опыта, доля",
+            "Ошибка в конце, доля",
+            "Статус установления",
+            "IAE, доля·с",
+            "Насыщение η, с",
         ))
         for run in runs:
             for time_value, response_value in zip(run["time"], run["response"], strict=True):
@@ -68,6 +80,12 @@ def write_comparison_csv(path, runs):
                     _format_optional(run["relative_deviation"]),
                     _format_optional(run["settling_duration"]),
                     _format_number(run["static_error"]),
+                    _format_optional(run.get("steady_state")),
+                    _format_optional(run.get("final_value")),
+                    _format_optional(run.get("final_error")),
+                    run.get("settling_status", "нет данных"),
+                    _format_optional(run.get("iae")),
+                    _format_optional(run.get("saturation_duration")),
                 ))
     return destination
 

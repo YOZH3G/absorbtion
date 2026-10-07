@@ -3,8 +3,10 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 from app.calculations import CONTROLLER_TYPES, DEFAULT_MODEL_VALUES
-from app.validation import parse_percentage
+from app.validation import parse_percentage, parse_nonnegative_number
+from app.laboratory import FASTEST_OPTIONS
 from .model_dialog import ModelParametersDialog
+from .ui_helpers import ScrollablePage
 from app.scenario_store import CHAINS, DISTURBANCE_TYPES, normalize_scenario
 
 
@@ -53,6 +55,7 @@ class ScenarioEditorDialog(tk.Toplevel):
             "control_limit": tk.StringVar(),
             "setpoint": tk.StringVar(),
             "steady_tolerance_percent": tk.StringVar(),
+            "steady_absolute_tolerance": tk.StringVar(),
             "attempt_limit": tk.StringVar(),
             "target_enabled": tk.BooleanVar(),
             "target_type": tk.StringVar(),
@@ -62,6 +65,9 @@ class ScenarioEditorDialog(tk.Toplevel):
             "target_integral_max": tk.StringVar(),
             "target_derivative_min": tk.StringVar(),
             "target_derivative_max": tk.StringVar(),
+            "target_settled": tk.BooleanVar(),
+            "target_max_iae": tk.StringVar(),
+            "target_max_saturation": tk.StringVar(),
             "answer_direction": tk.StringVar(),
             "answer_steady": tk.StringVar(),
             "answer_fastest": tk.StringVar(),
@@ -204,7 +210,7 @@ class ScenarioEditorDialog(tk.Toplevel):
         ).grid(row=2, column=1, sticky="ew", padx=(4, 0), pady=(8, 0))
         ttk.Label(
             list_card,
-            text=f"Формат JSON v1\n{self.store.path}",
+            text=f"Формат JSON v2\n{self.store.path}",
             style="Muted.TLabel",
             wraplength=245,
         ).grid(row=6, column=0, sticky="w", pady=(10, 0))
@@ -225,15 +231,18 @@ class ScenarioEditorDialog(tk.Toplevel):
         general = ttk.Frame(notebook, style="CardBody.TFrame", padding=16)
         dynamics = ttk.Frame(notebook, style="CardBody.TFrame", padding=16)
         controller = ttk.Frame(notebook, style="CardBody.TFrame", padding=16)
-        lesson = ttk.Frame(notebook, style="CardBody.TFrame", padding=16)
+        lesson_page = ScrollablePage(notebook, background=self.cget("background"))
+        lesson = ttk.Frame(lesson_page.content, style="CardBody.TFrame", padding=16)
+        lesson.grid(row=0, column=0, sticky="ew")
         notebook.add(general, text="Сценарий")
         notebook.add(dynamics, text="Динамика")
         notebook.add(controller, text="Регулятор и задание")
-        notebook.add(lesson, text="Учебное задание")
+        notebook.add(lesson_page, text="Учебное задание")
         self._build_general_tab(general)
         self._build_dynamics_tab(dynamics)
         self._build_controller_tab(controller)
         self._build_lesson_tab(lesson)
+        lesson_page.bind_mousewheel()
 
         ttk.Label(
             form,
@@ -377,6 +386,7 @@ class ScenarioEditorDialog(tk.Toplevel):
         self._setpoint_entry = self._entry(tab, 6, "Задание, % (пусто = базовое)", "setpoint")
         ttk.Separator(tab).grid(row=7, column=0, columnspan=2, sticky="ew", pady=14)
         self._entry(tab, 8, "Допуск прогноза установившегося значения, %", "steady_tolerance_percent")
+        self._entry(tab, 9, "Абсолютный допуск прогноза, п.п.", "steady_absolute_tolerance")
 
     def _build_lesson_tab(self, tab):
         tab.columnconfigure(1, weight=1)
@@ -405,8 +415,14 @@ class ScenarioEditorDialog(tk.Toplevel):
         )
         self._combobox(tab, 12, "Направление", "answer_direction", ("", "Увеличится", "Уменьшится", "Не изменится"))
         self._entry(tab, 13, "Установившееся значение", "answer_steady")
-        self._combobox(tab, 14, "Скорость реакции", "answer_fastest", ("", "Без регулятора", "С регулятором", "Одинаково", "Без сравнения"))
+        self._combobox(tab, 14, "Скорость реакции", "answer_fastest", ("", *FASTEST_OPTIONS))
         self._combobox(tab, 15, "Действие регулятора", "answer_correction", ("", "Да", "Нет", "Регулятор выключен"))
+        self._target_settled_check = ttk.Checkbutton(tab, text="Требовать подтверждённое установление",
+                                                   variable=self._variables["target_settled"])
+        self._target_settled_check.grid(row=16, column=0, columnspan=3, sticky="w", pady=6)
+        self._normal_widgets.append(self._target_settled_check)
+        self._target_iae_entry = self._entry(tab, 17, "Максимальный IAE, п.п.·с (пусто = без ограничения)", "target_max_iae")
+        self._target_saturation_entry = self._entry(tab, 18, "Максимальное насыщение η, с (пусто = без ограничения)", "target_max_saturation")
 
     def _text_field(self, parent, row, label, key, height):
         ttk.Label(parent, text=label, style="Body.TLabel").grid(
@@ -555,6 +571,7 @@ class ScenarioEditorDialog(tk.Toplevel):
             "control_limit": "100" if controller is None else self._format_number(controller["control_limit"] * 100),
             "setpoint": "" if controller is None else self._format_optional(None if controller.get("setpoint") is None else controller["setpoint"] * 100),
             "steady_tolerance_percent": self._format_number(scenario.get("steady_tolerance_percent", 5.0)),
+            "steady_absolute_tolerance": f"{scenario.get('steady_absolute_tolerance', 1e-6) * 100:.8g}",
             "attempt_limit": str(lesson["attempt_limit"]),
             "target_enabled": bool(target),
             "target_type": target.get("type", "PI"),
@@ -564,6 +581,9 @@ class ScenarioEditorDialog(tk.Toplevel):
             "target_integral_max": self._format_optional(target.get("integral_time_max")),
             "target_derivative_min": self._format_optional(target.get("derivative_time_min")),
             "target_derivative_max": self._format_optional(target.get("derivative_time_max")),
+            "target_settled": target.get("require_settled", False),
+            "target_max_iae": self._format_optional(None if target.get("max_iae") is None else target["max_iae"] * 100),
+            "target_max_saturation": self._format_optional(target.get("max_saturation_duration")),
             "answer_direction": answers.get("direction", ""),
             "answer_steady": self._format_optional(None if answers.get("steady") is None else answers["steady"] * 100),
             "answer_fastest": answers.get("fastest", ""),
@@ -730,7 +750,8 @@ class ScenarioEditorDialog(tk.Toplevel):
         else:
             state = "normal" if self._variables["target_enabled"].get() else "disabled"
         self._target_type_box.configure(state="readonly" if state == "normal" else "disabled")
-        for entry in (*self._target_gain_entries, *self._target_integral_entries, *self._target_derivative_entries):
+        for entry in (*self._target_gain_entries, *self._target_integral_entries, *self._target_derivative_entries,
+                      self._target_settled_check, self._target_iae_entry, self._target_saturation_entry):
             entry.configure(state=state)
 
     def _new_scenario(self):
@@ -947,6 +968,7 @@ class ScenarioEditorDialog(tk.Toplevel):
             "delay": self._variables["delay"].get(),
             "controller": controller,
             "steady_tolerance_percent": self._variables["steady_tolerance_percent"].get(),
+            "steady_absolute_tolerance": parse_nonnegative_number(self._variables["steady_absolute_tolerance"].get()) / 100,
             "lesson": self._collect_lesson(),
         })
 
@@ -965,6 +987,12 @@ class ScenarioEditorDialog(tk.Toplevel):
         target = None
         if self._variables["target_enabled"].get():
             target = {"type": self._variables["target_type"].get()}
+            target["require_settled"] = self._variables["target_settled"].get()
+            for source, destination, scale in (("target_max_iae", "max_iae", 100),
+                                               ("target_max_saturation", "max_saturation_duration", 1)):
+                value = self._variables[source].get().strip()
+                if value:
+                    target[destination] = parse_nonnegative_number(value) / scale
             for source, destination in (
                 ("target_gain_min", "gain_min"), ("target_gain_max", "gain_max"),
                 ("target_integral_min", "integral_time_min"), ("target_integral_max", "integral_time_max"),

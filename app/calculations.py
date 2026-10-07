@@ -107,7 +107,9 @@ def first_order_response(
     return response
 
 
-def transition_metrics(time, response, target, baseline, settling_band=0.05):
+def transition_metrics(time, response, target, baseline, settling_band=0.05, *,
+                       steady_value=None, stationary_from=None, confirmation_time=0.0,
+                       reference=None):
     """Return teaching metrics for a simulated transition process."""
     time = np.asarray(time, dtype=float)
     response = np.asarray(response, dtype=float)
@@ -122,7 +124,14 @@ def transition_metrics(time, response, target, baseline, settling_band=0.05):
     if not 0 < settling_band < 1:
         raise ValueError("Полоса регулирования должна быть долей от нуля до единицы.")
 
-    steady_state = float(target[-1])
+    if not (np.isfinite(time).all() and np.isfinite(response).all()
+            and np.isfinite(target).all()) or np.any(np.diff(time) <= 0):
+        raise ValueError("Сигналы должны быть конечными, а время — строго возрастать.")
+    steady_state = float(target[-1] if steady_value is None else steady_value)
+    stationary_from = float(time[0] if stationary_from is None else stationary_from)
+    reference = float(baseline if reference is None else reference)
+    if not np.all(np.isfinite([steady_state, stationary_from, confirmation_time, reference])) or confirmation_time < 0:
+        raise ValueError("Параметры установления должны быть конечными; время подтверждения неотрицательно.")
     maximum_deviation = float(np.max(np.abs(response - baseline)))
     relative_deviation = (
         maximum_deviation / abs(baseline) * 100.0
@@ -130,22 +139,29 @@ def transition_metrics(time, response, target, baseline, settling_band=0.05):
         else None
     )
     reference_deviation = max(maximum_deviation, abs(steady_state - baseline))
-    tolerance = settling_band * reference_deviation
+    tolerance = max(settling_band * reference_deviation, 1e-12)
     outside = np.flatnonzero(np.abs(response - steady_state) > tolerance)
-    if outside.size == 0:
-        settling_time = float(time[0])
-    elif outside[-1] + 1 < time.size:
-        settling_time = float(time[outside[-1] + 1])
-    else:
-        settling_time = None
+    candidate = max(int(np.searchsorted(time, stationary_from)),
+                    int(outside[-1] + 1) if outside.size else 0)
+    settling_time = (float(time[candidate]) if candidate < time.size
+                     and time[-1] - time[candidate] >= confirmation_time else None)
+    settling_status = ("Воздействие ещё не завершено" if stationary_from > time[-1]
+                       else "Установилось за время опыта" if settling_time is not None
+                       else "Установление не подтверждено")
 
     return {
         "initial_value": float(response[0]),
         "steady_state": steady_state,
+        "final_value": float(response[-1]),
+        "final_error": reference - float(response[-1]),
+        "settling_status": settling_status,
+        "settling_tolerance": tolerance,
         "maximum_deviation": maximum_deviation,
         "relative_deviation": relative_deviation,
         "settling_time": settling_time,
-        "static_error": float(baseline - steady_state),
+        "static_error": reference - steady_state,
+        "iae": None,
+        "saturation_duration": None,
     }
 
 

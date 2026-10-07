@@ -1,3 +1,4 @@
+import copy
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
@@ -7,7 +8,7 @@ from matplotlib.colors import ListedColormap
 from matplotlib.figure import Figure
 
 APP_NAME = "Анализ процесса абсорбции"
-APP_VERSION = "1.5.0"
+APP_VERSION = "1.5.1"
 
 from app.calculations import (
     CONTROLLER_TYPES,
@@ -46,6 +47,7 @@ from app.laboratory import (
 from app.scenario_store import ScenarioStore
 from app.session_store import read_session, write_session
 from app.settings_store import SettingsStore
+from app.plotting import adaptive_legend
 from app.simulation import LEAN_GAS, RICH_ABSORBENT, run_simulation, tune_balanced_controller
 from app.validation import parse_fraction, parse_nonnegative_number, parse_positive_number, parse_percentage
 from ui.model_dialog import ModelParametersDialog
@@ -159,6 +161,10 @@ class AbsorptionApp(ttk.Frame):
                 "settling_time",
                 "settling_moment",
                 "static_error",
+                "final_error",
+                "settling_status",
+                "iae",
+                "saturation_duration",
             )
         }
         self.response_subtitle = tk.StringVar()
@@ -175,6 +181,7 @@ class AbsorptionApp(ttk.Frame):
             value=self._scenario_storage_text()
         )
         self.assignment_tolerance_percent = 5.0
+        self.assignment_absolute_tolerance = 1e-6
         self.current_lesson = self.scenarios[0]["lesson"]
         self.assignment_attempts = 0
         self.assignment_evaluation = None
@@ -198,6 +205,7 @@ class AbsorptionApp(ttk.Frame):
         self.last_prediction = None
         self.controller_signal_axis = None
         self.comparison_runs = []
+        self.comparison_details = tk.StringVar()
         self.comparison_counter = 0
         self.comparison_summary = tk.StringVar(
             value="Закрепите результаты нескольких расчётов для сравнения."
@@ -565,7 +573,10 @@ class AbsorptionApp(ttk.Frame):
         def apply_values(values):
             self.model_values = values
             self.setpoint.set(self._format_number(self._current_baseline() * 100))
-            self._reset()
+            self._mark_result_stale()
+            self._draw_control_diagram()
+            if self.last_calculation is None:
+                self._draw_static_charts()
             self._set_status("Параметры модели обновлены")
 
         self.model_dialog = ModelParametersDialog(
@@ -1059,25 +1070,33 @@ class AbsorptionApp(ttk.Frame):
         )
         metric_rows = (
             ("Начальное значение", "initial"),
-            ("Установившееся значение", "steady"),
+            ("Теоретический установившийся режим", "steady"),
             ("Максимальное отклонение", "maximum_deviation"),
             ("Относительное отклонение", "relative_deviation"),
             ("Постоянная времени T", "time_constant"),
             (self.settling_time_label, "settling_time"),
             ("Момент установления на графике", "settling_moment"),
-            ("Статическая ошибка eуст", "static_error"),
+            ("Теоретическая ошибка eуст", "static_error"),
+            ("Ошибка в конце опыта", "final_error"),
+            ("Статус установления", "settling_status"),
+            ("IAE относительно задания", "iae"),
+            ("Длительность насыщения η", "saturation_duration"),
         )
         metric_help = {
             "maximum_deviation": "Наибольшее расстояние выхода от начального значения за время моделирования.",
             "relative_deviation": "Максимальное отклонение, выраженное в процентах от начального значения.",
             "time_constant": "Параметр инерционности объекта, заданный перед расчётом.",
-            "settling_time": "Время после начала реакции, когда выход окончательно входит в полосу ±5%.",
+            "settling_time": "Время после начала реакции до входа в полосу ±5%; после завершения воздействия нахождение в полосе подтверждается ещё в течение T.",
             "settling_moment": "Абсолютная координата момента установления на оси времени графика.",
-            "static_error": "Разность между заданным и установившимся значениями выхода.",
+            "static_error": "Разность между заданием (базой без регулятора) и теоретическим режимом; достижение этого режима не гарантируется.",
+            "final_error": "Разность между заданием (базой без регулятора) и последней точкой выхода, в процентных пунктах.",
+            "iae": "Интеграл модуля ошибки относительно задания за весь опыт, в п.п.·с. Применим только с регулятором.",
+            "saturation_duration": "Суммарное время на нижнем или верхнем допустимом пределе η, в секундах.",
         }
         for row, (label, key) in enumerate(metric_rows, start=1):
             label_options = {"textvariable": label} if isinstance(label, tk.StringVar) else {"text": label}
             metric_label = ttk.Label(metrics, style="Body.TLabel", **label_options)
+            metric_label.configure(wraplength=200)
             metric_label.grid(row=row, column=0, sticky="w", pady=3)
             if key in metric_help:
                 self._attach_tooltip(metric_label, metric_help[key])
@@ -1184,6 +1203,8 @@ class AbsorptionApp(ttk.Frame):
             xscrollcommand=horizontal.set,
         )
         self.comparison_table.bind("<<TreeviewSelect>>", lambda _event: self._draw_comparison())
+        ttk.Label(card, textvariable=self.comparison_details, style="Muted.TLabel",
+                  wraplength=330, justify="left").grid(row=4, column=0, sticky="w", pady=(12, 0))
 
         actions = ttk.Frame(card, style="CardBody.TFrame")
         actions.grid(row=3, column=0, sticky="ew", pady=(12, 0))
@@ -1594,6 +1615,7 @@ class AbsorptionApp(ttk.Frame):
             )
 
         self.assignment_tolerance_percent = scenario.get("steady_tolerance_percent", 5.0)
+        self.assignment_absolute_tolerance = scenario.get("steady_absolute_tolerance", 1e-6)
         self._update_input_states()
         self._clear_result_values()
         self.predicted_direction.set("")
@@ -1792,6 +1814,7 @@ class AbsorptionApp(ttk.Frame):
             self.assignment_tolerance_percent,
             lesson=self.current_lesson,
             controller=self.last_calculation["controller"] if self.last_calculation is not None else None,
+            steady_absolute_tolerance=self.assignment_absolute_tolerance,
         )
         self.assignment_attempts += 1
         self.assignment_evaluation = evaluation
@@ -1816,7 +1839,7 @@ class AbsorptionApp(ttk.Frame):
             )
             return
         self.comparison_counter += 1
-        scenario_name = self._active_scenario_title()
+        scenario_name = self.last_calculation["title"]
         name = f"Опыт {self.comparison_counter}: {scenario_name}"
         run = build_comparison_run(
             self.last_calculation,
@@ -2098,12 +2121,21 @@ class AbsorptionApp(ttk.Frame):
                 result["flow_value"] = None
             if result["disturbance_type"] == "Ступенчатое":
                 result["effect_duration"] = None
+            if not result["controller_enabled"]:
+                for key in ("controller_type", "proportional_gain", "integral_time", "derivative_time", "control_limit", "setpoint"):
+                    result[key] = None
+            else:
+                if "I" not in result["controller_type"]:
+                    result["integral_time"] = None
+                if "D" not in result["controller_type"]:
+                    result["derivative_time"] = None
             return result
         stale = normalized(self._capture_input_state()) != normalized(self.last_calculation["input_state"])
         self.export_summary.set("Параметры изменены — пересчитайте опыт. Экспорт относится к последнему расчёту."
                                 if stale else "Расчёт готов к экспорту.")
-        self.response_subtitle.set("Параметры изменены — график последнего расчёта" if stale
-                                   else "Результат последнего расчёта")
+        chain_name = "обеднённый газ" if self.last_calculation["chain"] == LEAN_GAS else "насыщенный абсорбент"
+        self.response_subtitle.set(f"Параметры изменены — последний расчёт: {chain_name}" if stale
+                                   else f"Последний расчёт: {chain_name}")
 
     def _capture_input_state(self):
         return {
@@ -2174,6 +2206,14 @@ class AbsorptionApp(ttk.Frame):
         if not hasattr(self, "comparison_table") or self.current_page != "comparison":
             return
         runs = self._selected_comparison_runs()
+        def metric(value, unit, scale=100):
+            return "не применимо" if value is None else self._format_number(value * scale) + unit
+        self.comparison_details.set("\n\n".join(
+            f"{run['name']}: {run.get('settling_status', 'нет данных')}.\n"
+            f"Теория {metric(run.get('steady_state'), '%')}; конец {metric(run.get('final_value'), '%')}.\n"
+            f"Ошибка: теория {metric(run['static_error'], ' п.п.')}; конец {metric(run.get('final_error'), ' п.п.')}.\n"
+            f"IAE {metric(run.get('iae'), ' п.п.·с')}; насыщение η {metric(run.get('saturation_duration'), ' с', 1)}."
+            for run in runs))
         self._remove_controller_axis()
         self.primary_chart_title.set("Сравнение переходных процессов")
         self.primary_chart_subtitle.set("Закреплённые расчёты на одном графике")
@@ -2319,14 +2359,18 @@ class AbsorptionApp(ttk.Frame):
         )
         if not selected:
             return
-        title = self._active_scenario_title()
+        title = self.last_calculation["title"]
         try:
+            self._draw_calculation_result(self.last_calculation)
+            self.disturbance_canvas.draw()
+            self.response_canvas.draw()
+            self._mark_result_stale()
             path = writer(
-                selected, self.last_calculation, title, self.current_lesson,
-                self.assignment_evaluation, self.student_name.get(),
+                selected, self.last_calculation, title, self.last_calculation["lesson"],
+                self.last_calculation["evaluation"], self.student_name.get(),
                 self.student_conclusion.get(),
                 (self.disturbance_axis.figure, self.response_axis.figure),
-                prediction=self.last_prediction,
+                prediction=self.last_calculation["prediction"],
                 comparison_runs=self.comparison_runs,
             )
         except OSError as error:
@@ -2339,7 +2383,7 @@ class AbsorptionApp(ttk.Frame):
         self._set_status(f"{format_name.upper()}-отчёт сохранён")
 
     def _build_protocol_text(self):
-        title = self._active_scenario_title(include_prefix=True)
+        title = self.last_calculation["title"]
         return build_protocol(self.last_calculation, title)
 
     def _active_scenario_title(self, include_prefix=False):
@@ -2369,7 +2413,10 @@ class AbsorptionApp(ttk.Frame):
             self.response_subtitle.set("Концентрация насыщенного абсорбента")
 
         self.setpoint.set(self._format_number(self._current_baseline() * 100))
-        self._reset()
+        self._draw_control_diagram()
+        self._mark_result_stale()
+        if self.last_calculation is None:
+            self._draw_static_charts()
 
     def _current_baseline(self):
         return float(absorption_balance(**self.model_values)["xog" if self.chain == LEAN_GAS else "xna"])
@@ -2395,8 +2442,7 @@ class AbsorptionApp(ttk.Frame):
         self.tuning_summary.set(f"Автоподбор {controller_type} готов к запуску.")
         self._update_controller_entry_states()
         if hasattr(self, "disturbance_axis") and _event is not None:
-            self._clear_result_values()
-            self._draw_static_charts()
+            self._mark_result_stale()
             self._set_status("Тип регулятора изменён — выполните расчёт")
 
     def _update_controller_entry_states(self):
@@ -2414,11 +2460,9 @@ class AbsorptionApp(ttk.Frame):
 
     def _set_controller_mode(self, enabled):
         self.controller_enabled.set(enabled)
-        self.settling_time_label.set(
-            "Длительность регулирования (±5%)"
-            if enabled
-            else "Длительность установления (±5%)"
-        )
+        if self.last_calculation is None:
+            self.settling_time_label.set("Длительность регулирования (±5%)" if enabled
+                                         else "Длительность установления (±5%)")
         self.controller_off_button.configure(
             style="Segment.TButton" if enabled else "SelectedSegment.TButton"
         )
@@ -2428,8 +2472,9 @@ class AbsorptionApp(ttk.Frame):
         self._update_controller_entry_states()
         self.controller_error.set("")
         if hasattr(self, "disturbance_axis"):
-            self._clear_result_values()
-            self._draw_static_charts()
+            self._mark_result_stale()
+            if self.last_calculation is None:
+                self._draw_static_charts()
             self._set_status("Режим управления изменён — выполните расчёт")
 
     def _auto_tune_controller(self):
@@ -2694,6 +2739,8 @@ class AbsorptionApp(ttk.Frame):
             return
         result["disturbance_type"] = self.disturbance_type.get()
         result["input_state"] = self._capture_input_state()
+        result["title"] = self._active_scenario_title()
+        result["lesson"] = copy.deepcopy(self.current_lesson)
 
         self.baseline_result.set(self._format_number(result["baseline"] * 100) + "%")
         self.disturbance_result.set(
@@ -2719,12 +2766,14 @@ class AbsorptionApp(ttk.Frame):
         )
         self.last_calculation = result
         self.last_prediction = prediction
+        result["prediction"] = copy.deepcopy(prediction)
         self.add_comparison_button.configure(state="normal")
         for button in self.export_buttons:
             button.configure(state="normal")
         self.export_summary.set("Расчёт готов к экспорту." if result["setpoint_reachable"] is not False
                                 else "Задание недостижимо при допустимых η; показано насыщение регулятора.")
         self._evaluate_assignment(prediction, result["prediction_outcome"])
+        result["evaluation"] = copy.deepcopy(self.assignment_evaluation) if prediction is not None else None
         settling_time = result["metrics"]["settling_time"]
         settling_summary = (
             "не установилось"
@@ -2762,6 +2811,8 @@ class AbsorptionApp(ttk.Frame):
         )
 
     def _update_transition_metrics(self, metrics, dynamics, response_start):
+        self.settling_time_label.set("Длительность установления (±5%)" if metrics["iae"] is None
+                                     else "Длительность регулирования (±5%)")
         settling_time = metrics["settling_time"]
         if settling_time is None:
             settling_text = "не достигнуто"
@@ -2781,6 +2832,12 @@ class AbsorptionApp(ttk.Frame):
         self.transition_values["settling_time"].set(settling_text)
         self.transition_values["settling_moment"].set(settling_moment_text)
         self.transition_values["static_error"].set(self._format_signed_number(metrics["static_error"] * 100) + " п.п.")
+        self.transition_values["final_error"].set(self._format_signed_number(metrics["final_error"] * 100) + " п.п.")
+        self.transition_values["settling_status"].set(metrics["settling_status"])
+        self.transition_values["iae"].set("не применимо без регулятора" if metrics["iae"] is None
+                                          else self._format_number(metrics["iae"] * 100) + " п.п.·с")
+        self.transition_values["saturation_duration"].set("не применимо без регулятора" if metrics["saturation_duration"] is None
+                                                          else self._format_number(metrics["saturation_duration"]) + " с")
 
     def _reset(self):
         self.component_enabled.set(False)
@@ -3081,7 +3138,7 @@ class AbsorptionApp(ttk.Frame):
             *plot_samples(time, error * 100),
             color="#F59E0B",
             linewidth=2,
-            label="Ошибка e(t)",
+            label="Ошибка e(t), п.п.",
         )[0]
         self.disturbance_axis.axhline(0.0, color=MUTED, linestyle="--", linewidth=1)
         self._annotate_timing(self.disturbance_axis, dynamics)
@@ -3144,58 +3201,78 @@ class AbsorptionApp(ttk.Frame):
 
     @staticmethod
     def _place_legend_above(axis, handles=None, labels=None):
-        if handles is None:
-            handles, labels = axis.get_legend_handles_labels()
-        if not handles:
+        legend = adaptive_legend(axis, handles, labels)
+        canvas = axis.figure.canvas
+        old = getattr(canvas, "_legend_resize_callback", None)
+        if old is not None:
+            canvas.mpl_disconnect(old)
+        if legend is None:
             return
-        axis.legend(
-            handles,
-            labels,
-            loc="lower center",
-            bbox_to_anchor=(0.5, 1.02),
-            frameon=False,
-            fontsize=8,
-            ncol=len(handles),
-            borderaxespad=0,
-            columnspacing=1.4,
-            handletextpad=0.6,
-        )
+
+        def resized(_event):
+            AbsorptionApp._place_legend_above(axis, handles, labels)
+            AbsorptionApp._enable_legend_toggles(axis, canvas)
+            canvas.draw_idle()
+
+        canvas._legend_resize_callback = canvas.mpl_connect("resize_event", resized)
 
     @staticmethod
     def _enable_legend_toggles(axis, canvas):
-        callback_id = getattr(canvas, "_legend_toggle_callback", None)
-        if callback_id is not None:
-            canvas.mpl_disconnect(callback_id)
+        for attribute in ("_legend_toggle_callback", "_legend_key_callback"):
+            callback = getattr(canvas, attribute, None)
+            if callback is not None:
+                canvas.mpl_disconnect(callback)
         legend = axis.get_legend()
         if legend is None:
-            canvas._legend_toggle_callback = None
             return
         artists_by_label = {
             artist.get_label(): artist
-            for artist in axis.lines
+            for chart in axis.figure.axes
+            for artist in (*chart.lines, *chart.patches, *chart.collections)
             if artist.get_label() and not artist.get_label().startswith("_")
         }
+        visibility = getattr(canvas, "_curve_visibility", {})
+        canvas._curve_visibility = visibility
+        entries = []
         toggle_map = {}
-        for legend_line, legend_text in zip(
-            legend.get_lines(),
-            legend.get_texts(),
-            strict=False,
-        ):
-            artist = artists_by_label.get(legend_text.get_text())
+        labels = getattr(legend, "_source_labels", tuple(text.get_text() for text in legend.get_texts()))
+        for sample, text, label in zip(legend.legend_handles, legend.get_texts(), labels, strict=True):
+            artist = artists_by_label.get(label)
             if artist is None:
                 continue
-            legend_line.set_picker(5)
-            toggle_map[legend_line] = artist
+            artist.set_visible(visibility.get(label, artist.get_visible()))
+            sample.set_picker(5)
+            text.set_picker(True)
+            entry = (artist, sample, text, label)
+            entries.append(entry)
+            toggle_map[sample] = toggle_map[text] = entry
+            for item in (sample, text):
+                item.set_alpha(1.0 if artist.get_visible() else 0.25)
 
-        def toggle(event):
-            artist = toggle_map.get(event.artist)
-            if artist is None:
-                return
-            artist.set_visible(not artist.get_visible())
-            event.artist.set_alpha(1.0 if artist.get_visible() else 0.25)
+        def change(entry):
+            artist, sample, text, label = entry
+            visible = not artist.get_visible()
+            artist.set_visible(visible)
+            visibility[label] = visible
+            sample.set_alpha(1.0 if visible else 0.25)
+            text.set_alpha(1.0 if visible else 0.25)
             canvas.draw_idle()
 
+        def toggle(event):
+            if event.artist in toggle_map:
+                change(toggle_map[event.artist])
+
+        def keyboard(event):
+            if event.key in tuple(str(index + 1) for index in range(len(entries))):
+                change(entries[int(event.key) - 1])
+
         canvas._legend_toggle_callback = canvas.mpl_connect("pick_event", toggle)
+        canvas._legend_key_callback = canvas.mpl_connect("key_press_event", keyboard)
+        if hasattr(canvas, "get_tk_widget") and not getattr(canvas, "_legend_focus_bound", False):
+            widget = canvas.get_tk_widget()
+            widget.configure(takefocus=True)
+            widget.bind("<Button-1>", lambda _event: widget.focus_set(), add="+")
+            canvas._legend_focus_bound = True
 
     def _annotate_transition(self, axis, dynamics, metrics):
         self._annotate_timing(
@@ -3205,12 +3282,8 @@ class AbsorptionApp(ttk.Frame):
         )
         if metrics is None:
             return
-        reference = max(
-            metrics["maximum_deviation"],
-            abs(metrics["steady_state"] - metrics["initial_value"]),
-        )
-        tolerance = reference * 0.05
-        if tolerance > 0:
+        tolerance = metrics["settling_tolerance"]
+        if tolerance > 1e-12:
             axis.axhspan(
                 100 * (metrics["steady_state"] - tolerance),
                 100 * (metrics["steady_state"] + tolerance),

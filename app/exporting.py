@@ -10,6 +10,7 @@ from matplotlib.figure import Figure
 
 from .laboratory import format_protocol
 from .simulation import LEAN_GAS
+from .plotting import adaptive_legend
 
 
 def save_graphs(signal_figure, response_figure, selected_path):
@@ -96,7 +97,8 @@ def build_protocol(result, title):
         ("Суммарная доля", f"{_format_number(result['combined_fraction'])} ({result['combined_fraction'] * 100:+.1f}%)"),
         ("Расчётное значение", f"{result["calculated"] * 100:.8g}%"),
         ("В конце моделирования", f"{result["final_response"][-1] * 100:.8g}%"),
-        ("Установившееся значение", f"{metrics["steady_state"] * 100:.8g}%"),
+        ("Теоретический установившийся режим", f"{metrics["steady_state"] * 100:.8g}%"),
+        ("Статус установления", metrics["settling_status"]),
         ("Максимальное отклонение", f"{metrics["maximum_deviation"] * 100:.8g} п.п."),
         (
             "Относительное отклонение",
@@ -108,7 +110,13 @@ def build_protocol(result, title):
             else "Длительность установления (±5%)",
             "не достигнуто" if settling_duration is None else f"{settling_duration:.1f} с",
         ),
-        ("Статическая ошибка", f"{metrics['static_error'] * 100:+.8g} п.п."),
+        ("Теоретическая ошибка", f"{metrics['static_error'] * 100:+.8g} п.п."),
+        ("Ошибка в конце опыта", f"{metrics['final_error'] * 100:+.8g} п.п."),
+        ("Полуширина полосы ±5%", f"{metrics['settling_tolerance'] * 100:.8g} п.п."),
+        ("IAE относительно задания", "не применимо без регулятора" if metrics["iae"] is None
+         else f"{metrics['iae'] * 100:.8g} п.п.·с"),
+        ("Длительность насыщения η", "не применимо без регулятора" if metrics["saturation_duration"] is None
+         else f"{metrics['saturation_duration']:.8g} с"),
     ]
     balance = result["stationary_balance"]
     for key in ("j", "gog", "gna", "mass_residual", "component_residual"):
@@ -227,7 +235,7 @@ def build_comparison_figures(runs):
     response_axis.set_xlabel("Время, с")
     response_axis.set_ylabel("Концентрация, %")
     response_axis.grid(color="#D7DCE2", linewidth=0.8)
-    response_axis.legend(loc="lower center", bbox_to_anchor=(0.5, 1.02), ncol=len(runs), frameon=False)
+    adaptive_legend(response_axis)
 
     metrics_figure = Figure(figsize=(10, 4.8), constrained_layout=True)
     metrics_axis = metrics_figure.add_subplot(111)
@@ -323,7 +331,14 @@ def _comparison_text(runs):
     return "\n".join(
         f"{run['name']}: регулятор {run['controller_type']}; "
         f"максимальное отклонение {_format_number(run['maximum_deviation'] * 100) + ' п.п.'}; "
-        f"установление {_format_optional_number(run['settling_duration'])} с."
+        f"установление {_format_optional_number(run['settling_duration'])} с; "
+        f"{run.get('settling_status', 'нет данных о статусе')}.\n"
+        f"Теория {_scaled_metric(run.get('steady_state'), '%')}; "
+        f"конец {_scaled_metric(run.get('final_value'), '%')}; "
+        f"ошибка: теория {_scaled_metric(run.get('static_error'), ' п.п.')}, "
+        f"конец {_scaled_metric(run.get('final_error'), ' п.п.')}; "
+        f"IAE {_scaled_metric(run.get('iae'), ' п.п.·с')}; "
+        f"насыщение η {_scaled_metric(run.get('saturation_duration'), ' с', 1)}."
         for run in runs
     )
 
@@ -380,12 +395,16 @@ def _comparison_markup(runs):
     return (
         "<table><thead><tr><th>Опыт</th><th>Регулятор</th>"
         "<th>Максимальное отклонение</th><th>Установление, с</th>"
-        f"</tr></thead><tbody>{rows}</tbody></table>"
+        f"</tr></thead><tbody>{rows}</tbody></table><pre>{html.escape(_comparison_text(runs))}</pre>"
     )
 
 
 def _format_optional_number(value):
     return "—" if value is None else _format_number(value)
+
+
+def _scaled_metric(value, unit, scale=100):
+    return "не применимо" if value is None else _format_number(value * scale) + unit
 
 
 def _format_number(value):

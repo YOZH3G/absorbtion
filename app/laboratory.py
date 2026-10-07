@@ -18,7 +18,7 @@ SCENARIOS = _load_builtin_scenarios()
 VARIANT_COUNT = 30
 
 DIRECTION_OPTIONS = ("Увеличится", "Уменьшится", "Не изменится")
-FASTEST_OPTIONS = ("Без регулятора", "С регулятором", "Одинаково", "Без сравнения")
+FASTEST_OPTIONS = ("Без регулятора", "С регулятором", "Одинаково", "Без сравнения", "Недостаточно времени наблюдения")
 CORRECTION_OPTIONS = ("Да", "Нет", "Регулятор выключен")
 PREDICTION_KEYS = ("direction", "steady", "fastest", "correction")
 HIDDEN_ANSWER_OPTIONS = {
@@ -120,7 +120,7 @@ def expected_fastest(open_duration, controlled_duration, controller_enabled):
     if not controller_enabled:
         return "Без сравнения"
     if open_duration is None and controlled_duration is None:
-        return "Одинаково"
+        return "Недостаточно времени наблюдения"
     if open_duration is None:
         return "С регулятором"
     if controlled_duration is None:
@@ -136,6 +136,7 @@ def evaluate_prediction(
     steady_tolerance_percent=5.0,
     lesson=None,
     controller=None,
+    steady_absolute_tolerance=1e-6,
 ):
     lesson = normalize_lesson(lesson)
     hidden_answers = lesson["hidden_answers"]
@@ -152,9 +153,12 @@ def evaluate_prediction(
         )),
         "correction": hidden_answers.get("correction", outcome["correction"]),
     }
+    if (not math.isfinite(steady_absolute_tolerance) or steady_absolute_tolerance < 0
+            or not math.isfinite(steady_tolerance_percent) or not 0 <= steady_tolerance_percent <= 100):
+        raise ValueError("Допуски прогноза должны быть конечными и неотрицательными.")
     steady_tolerance = max(
         abs(expected["steady"]) * steady_tolerance_percent / 100.0,
-        0.01,
+        steady_absolute_tolerance,
     )
     checks = [
         ("direction", prediction["direction"] == expected["direction"], "Направление", expected["direction"]),
@@ -162,18 +166,21 @@ def evaluate_prediction(
             "steady",
             abs(prediction["steady"] - expected["steady"]) <= steady_tolerance,
             "Установившееся значение",
-            f"{expected['steady']:.4f}".rstrip("0").rstrip("."),
+            f"{expected['steady'] * 100:.8g}%; допуск ±{steady_tolerance * 100:.8g} п.п.; "
+            f"отклонение ответа {abs(prediction['steady'] - expected['steady']) * 100:.8g} п.п.",
         ),
         ("fastest", prediction["fastest"] == expected["fastest"], "Скорость реакции", expected["fastest"]),
         ("correction", prediction["correction"] == expected["correction"], "Действие регулятора", expected["correction"]),
     ]
-    controller_check = _evaluate_controller_settings(controller, lesson["controller_target"])
+    controller_check = _evaluate_controller_settings(controller, lesson["controller_target"], outcome)
     if controller_check is not None:
         checks.append(("controller_settings", *controller_check))
     lines = [
         f"{'Верно' if passed else 'Неверно'}: {label}. Ответ: {answer}."
         for _key, passed, label, answer in checks
     ]
+    if expected["fastest"] == "Недостаточно времени наблюдения":
+        lines.append("Скорость не сравнивается: установление обоих процессов не подтверждено. Увеличьте время опыта.")
     criteria = [
         {
             "key": key,
@@ -290,10 +297,23 @@ def _normalize_controller_target(target):
             raise ValueError("Нижняя граница настройки не должна превышать верхнюю.")
         normalized[f"{key}_min"] = minimum
         normalized[f"{key}_max"] = maximum
+    if "require_settled" in target:
+        if not isinstance(target["require_settled"], bool):
+            raise ValueError("Требование установления должно быть логическим значением.")
+        normalized["require_settled"] = target["require_settled"]
+    for key in ("max_iae", "max_saturation_duration"):
+        if target.get(key) is not None:
+            try:
+                value = float(target[key])
+            except (TypeError, ValueError) as error:
+                raise ValueError("Предел качества отклика должен быть числом.") from error
+            if not math.isfinite(value) or value < 0:
+                raise ValueError("Предел качества отклика должен быть конечным и неотрицательным.")
+            normalized[key] = value
     return normalized
 
 
-def _evaluate_controller_settings(controller, target):
+def _evaluate_controller_settings(controller, target, outcome):
     if target is None:
         return None
     if controller is None:
@@ -308,5 +328,24 @@ def _evaluate_controller_settings(controller, target):
             continue
         value = controller["controller_gain"] if key == "gain" else controller[key]
         if not minimum <= value <= maximum:
-            return False, "Настройки регулятора", f"{label} = {minimum:g}…{maximum:g}"
-    return True, "Настройки регулятора", target["type"]
+            return False, "Настройки регулятора", f"{label} = {value:g}; требуется {minimum:g}…{maximum:g}"
+    if target.get("require_settled") and outcome.get("controlled_duration") is None:
+        return False, "Качество регулятора", "Установление не подтверждено за время опыта"
+    for key, label, scale, unit in (("iae", "IAE", 100, "п.п.·с"),
+                                     ("saturation_duration", "Насыщение η", 1, "с")):
+        maximum = target.get("max_" + key)
+        if maximum is None:
+            continue
+        value = outcome.get(key)
+        if value is None:
+            return False, "Качество регулятора", f"{label}: нет рассчитанного показателя"
+        if value > maximum:
+            return False, "Качество регулятора", f"{label}: {value * scale:g} {unit}; предел {maximum * scale:g} {unit}"
+    quality = []
+    if target.get("require_settled"):
+        quality.append("установление подтверждено")
+    if target.get("max_iae") is not None:
+        quality.append(f"IAE {outcome['iae'] * 100:g} ≤ {target['max_iae'] * 100:g} п.п.·с")
+    if target.get("max_saturation_duration") is not None:
+        quality.append(f"насыщение {outcome['saturation_duration']:g} ≤ {target['max_saturation_duration']:g} с")
+    return True, "Настройки и качество регулятора" if quality else "Настройки регулятора", ", ".join([target["type"], *quality])

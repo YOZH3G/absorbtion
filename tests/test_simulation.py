@@ -20,6 +20,62 @@ DYNAMICS = {
 
 
 class SimulationTests(unittest.TestCase):
+    def test_unfinished_ramp_uses_future_plateau_and_cannot_claim_settling(self):
+        result = run_simulation(LEAN_GAS, MODEL_VALUES, 0.1, 0,
+                                dict(DYNAMICS, kind="ramp", effect_duration=100,
+                                     simulation_duration=20))
+        self.assertAlmostEqual(result["metrics"]["steady_state"], result["calculated"])
+        self.assertEqual(result["metrics"]["settling_status"], "Воздействие ещё не завершено")
+        self.assertIsNone(result["metrics"]["settling_time"])
+
+    def test_temporary_disturbance_predicts_return_even_before_its_end(self):
+        for kind in (RECTANGLE, IMPULSE):
+            with self.subTest(kind=kind):
+                result = run_simulation(LEAN_GAS, MODEL_VALUES, 0.1, 0,
+                                        dict(DYNAMICS, kind=kind, effect_duration=30,
+                                             simulation_duration=20))
+                self.assertAlmostEqual(result["metrics"]["steady_state"], result["baseline"])
+                self.assertIsNone(result["metrics"]["settling_time"])
+
+    def test_final_error_is_distinct_from_theoretical_error_on_short_horizon(self):
+        result = run_simulation(LEAN_GAS, MODEL_VALUES, 0.1, 0,
+                                dict(DYNAMICS, simulation_duration=13))
+        metrics = result["metrics"]
+        self.assertAlmostEqual(metrics["final_value"], result["final_response"][-1])
+        self.assertAlmostEqual(metrics["final_error"], result["baseline"] - result["final_response"][-1])
+        self.assertNotAlmostEqual(metrics["final_error"], metrics["static_error"])
+        self.assertIsNone(metrics["iae"])
+        self.assertIsNone(metrics["saturation_duration"])
+
+    def test_closed_loop_iae_integrates_actual_error_on_the_calculation_grid(self):
+        controller = dict(controller_type="PI", controller_gain=0,
+                          integral_time=10, derivative_time=0,
+                          control_limit=1, setpoint=1 / 6)
+        result = run_simulation(LEAN_GAS, MODEL_VALUES, 0.1, 0, DYNAMICS, controller)
+        elapsed = DYNAMICS["simulation_duration"] - DYNAMICS["start_time"] - DYNAMICS["delay"]
+        expected = (result["calculated"] - result["baseline"]) * (
+            elapsed - DYNAMICS["time_constant"] * (1 - np.exp(-elapsed / DYNAMICS["time_constant"])))
+        self.assertAlmostEqual(result["metrics"]["iae"], expected, delta=1e-5)
+
+    def test_entering_band_at_the_end_does_not_confirm_settling(self):
+        short = run_simulation(LEAN_GAS, MODEL_VALUES, 0.1, 0,
+                               dict(DYNAMICS, simulation_duration=45))
+        long = run_simulation(LEAN_GAS, MODEL_VALUES, 0.1, 0,
+                              dict(DYNAMICS, simulation_duration=60))
+        self.assertLess(abs(short["final_response"][-1] - short["calculated"]),
+                        short["metrics"]["settling_tolerance"])
+        self.assertIsNone(short["metrics"]["settling_time"])
+        self.assertIsNotNone(long["metrics"]["settling_time"])
+        self.assertEqual(long["metrics"]["settling_status"], "Установилось за время опыта")
+
+    def test_saturation_duration_counts_intervals_in_seconds(self):
+        values = dict(MODEL_VALUES, eta=1)
+        controller = dict(controller_type="PI", controller_gain=0,
+                          integral_time=10, derivative_time=0,
+                          control_limit=1, setpoint=0)
+        result = run_simulation(LEAN_GAS, values, 0, 0, DYNAMICS, controller)
+        self.assertAlmostEqual(result["metrics"]["saturation_duration"], 100)
+
     def test_small_time_constants_and_pid_converge_with_off_grid_delay(self):
         dynamics = dict(DYNAMICS, time_constant=0.2, start_time=0.173,
                         simulation_duration=3.0, delay=0.027)

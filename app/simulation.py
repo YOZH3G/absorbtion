@@ -246,11 +246,18 @@ def run_simulation(
         )
         for label, target in delayed_targets.items()
     }
+    permanent = dynamics["kind"] in ("step", "ramp")
+    terminal_profile = 1.0 if permanent else 0.0
+    stationary_from = (dynamics["start_time"] + dynamics["delay"]
+                       + (0.0 if dynamics["kind"] == "step" else dynamics["effect_duration"]))
     open_metrics = transition_metrics(
         time,
         responses["Совместное воздействие"],
         targets["Совместное воздействие"],
         baseline,
+        steady_value=float(calculate(component_fraction * terminal_profile, flow_fraction * terminal_profile)),
+        stationary_from=stationary_from,
+        confirmation_time=dynamics["time_constant"],
     )
 
     controlled_response = None
@@ -270,16 +277,23 @@ def run_simulation(
         controlled_response = controlled_phases["xog" if chain == LEAN_GAS else "xna"]
         final_response = controlled_response
         terminal_inputs = disturbed_inputs(chain, model_values,
-                                           component_fraction * profile[-1],
-                                           flow_fraction * profile[-1])
+                                           component_fraction * terminal_profile,
+                                           flow_fraction * terminal_profile)
         steady_state = eta_steady_state(chain, terminal_inputs, controller)
         metrics = transition_metrics(
             time,
             controlled_response,
             np.full_like(time, steady_state),
             baseline,
+            stationary_from=stationary_from,
+            confirmation_time=dynamics["time_constant"],
+            reference=controller["setpoint"],
         )
-        metrics["static_error"] = controller["setpoint"] - steady_state
+        metrics["iae"] = float(np.trapezoid(np.abs(error), time))
+        low, high = _eta_bounds(model_values, controller)
+        saturated = (np.isclose(control[:-1], low, rtol=0, atol=1e-8)
+                     | np.isclose(control[:-1], high, rtol=0, atol=1e-8))
+        metrics["saturation_duration"] = float(np.sum(np.diff(time)[saturated]))
         response_start = (
             dynamics["delay"]
             if controller["setpoint"] != baseline
@@ -310,7 +324,7 @@ def run_simulation(
         correction = (
             "Да"
             if metrics["settling_time"] is not None
-            and abs(metrics["static_error"]) <= tolerance
+            and abs(metrics["final_error"]) <= tolerance
             else "Нет"
         )
 
@@ -352,6 +366,9 @@ def run_simulation(
             "controlled_duration": controlled_duration,
             "controller_enabled": controller is not None,
             "correction": correction,
+            "settling_status": metrics["settling_status"],
+            "iae": metrics["iae"],
+            "saturation_duration": metrics["saturation_duration"],
         },
     }
 

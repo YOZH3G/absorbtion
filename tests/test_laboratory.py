@@ -149,11 +149,37 @@ class PredictionTests(unittest.TestCase):
         self.assertEqual(expected_direction(10.0, 10.0), "Не изменится")
 
     def test_fastest_handles_controller_and_unsettled_response(self):
+        self.assertEqual(expected_fastest(None, None, True), "Недостаточно времени наблюдения")
         self.assertEqual(expected_fastest(20.0, 12.0, True), "С регулятором")
         self.assertEqual(expected_fastest(12.0, 20.0, True), "Без регулятора")
         self.assertEqual(expected_fastest(None, 12.0, True), "С регулятором")
         self.assertEqual(expected_fastest(12.0, None, True), "Без регулятора")
         self.assertEqual(expected_fastest(12.0, 13.0, False), "Без сравнения")
+
+    def test_small_concentrations_use_explicit_absolute_tolerance(self):
+        outcome = dict(baseline=0.001, disturbed_value=0.002, steady_value=0.001,
+                       open_duration=None, controlled_duration=None,
+                       controller_enabled=True, correction="Нет")
+        prediction = dict(direction="Увеличится", steady=0.0012,
+                          fastest="Недостаточно времени наблюдения", correction="Нет")
+        strict = evaluate_prediction(prediction, outcome, steady_tolerance_percent=5)
+        self.assertFalse(next(item for item in strict["criteria"] if item["key"] == "steady")["passed"])
+        tolerant = evaluate_prediction(prediction, outcome, steady_tolerance_percent=5,
+                                       steady_absolute_tolerance=0.0003)
+        self.assertTrue(next(item for item in tolerant["criteria"] if item["key"] == "steady")["passed"])
+
+    def test_in_range_controller_can_fail_response_quality(self):
+        outcome = dict(baseline=0.1, disturbed_value=0.2, steady_value=0.1,
+                       open_duration=30, controlled_duration=None, controller_enabled=True,
+                       correction="Нет", iae=0.4, saturation_duration=12)
+        prediction = dict(direction="Увеличится", steady=0.1,
+                          fastest="Без регулятора", correction="Нет")
+        lesson = {"controller_target": {"type": "PI", "gain_min": 1, "gain_max": 3,
+                                         "require_settled": True, "max_iae": 0.2}}
+        controller = dict(controller_type="PI", controller_gain=2, integral_time=10, derivative_time=0)
+        result = evaluate_prediction(prediction, outcome, lesson=lesson, controller=controller)
+        self.assertFalse(result["criteria"][-1]["passed"])
+        self.assertIn("не подтверждено", result["criteria"][-1]["answer"])
 
     def test_prediction_score_and_five_percent_steady_tolerance(self):
         outcome = {
