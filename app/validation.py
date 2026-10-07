@@ -1,4 +1,5 @@
 import math
+from decimal import Decimal
 
 
 MIN_FRACTION = -0.99
@@ -54,3 +55,25 @@ def parse_percentage(value):
     if number > 100:
         raise ValueError("Значение должно быть в диапазоне от 0 до 100%.")
     return number / 100.0
+
+
+def parse_disturbance(value, units="fraction"):
+    if units == "fraction":
+        return parse_fraction(value)
+    if units != "percent":
+        raise ValueError("Неизвестные единицы возмущения.")
+    number = _parse_number(value, "Введите значение.", "Введите число от −99 до 999%.")
+    if not math.isfinite(number) or not -99 <= number <= 999:
+        raise ValueError("Значение должно быть в диапазоне от −99 до 999%.")
+    return float(Decimal(value.strip().replace(",", ".")).scaleb(-2))
+
+
+def parse_value_list(value, parser):
+    """A decimal comma belongs to one number; semicolons/newlines separate values."""
+    source = value.replace("\n", ";").split(";")
+    if not 2 <= len(source) <= 6 or any(not item.strip() for item in source):
+        raise ValueError("Укажите от 2 до 6 значений через точку с запятой или с новой строки.")
+    values = tuple(parser(item.strip()) for item in source)
+    if len(set(values)) != len(values):
+        raise ValueError("Значения параметра не должны повторяться.")
+    return values

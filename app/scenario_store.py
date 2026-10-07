@@ -363,7 +363,7 @@ def _number(value, label, minimum=None, maximum=None, strict=False):
     if isinstance(value, bool):
         raise ValueError(f"{label}: введите число.")
     try:
-        number = float(value)
+        number = float(value.replace(",", ".") if isinstance(value, str) else value)
     except (TypeError, ValueError) as error:
         raise ValueError(f"{label}: введите число.") from error
     if not math.isfinite(number):

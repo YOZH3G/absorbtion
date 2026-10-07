@@ -306,6 +306,68 @@ class GuiStateTests(unittest.TestCase):
         self.assertGreater(app.comparison_table.winfo_width(), 545)
         self.assertGreater(app.chart_panes.winfo_height(), 250)
 
+    def test_units_preserve_precision_snapshot_and_physical_result(self):
+        import numpy as np
+        app = self.app
+        app.component_value.set("0.12345678901234567")
+        app._calculate()
+        self.wait_for_task()
+        original = app.last_calculation["final_response"].copy()
+        app.disturbance_units.set("%")
+        app._switch_disturbance_units()
+        self.assertEqual(app.component_value.get(), "12.345678901234567")
+        self.assertNotIn("Параметры изменены", app.export_summary.get())
+        app._calculate()
+        self.wait_for_task()
+        np.testing.assert_array_equal(app.last_calculation["final_response"], original)
+        saved = app._capture_input_state()
+        app.disturbance_units.set("Доля")
+        app._switch_disturbance_units()
+        self.assertEqual(app.component_value.get(), "0.12345678901234567")
+        app._restore_input_state(saved, preserve_result=True)
+        self.assertEqual(app._disturbance_units, "percent")
+        self.assertEqual(app.component_value.get(), "12.345678901234567")
+        self.assertNotIn("Параметры изменены", app.export_summary.get())
+
+    def test_unit_switch_preserves_running_task_and_rejects_invalid_draft(self):
+        from threading import Event
+        release = Event()
+        app = self.app
+        app._start_task("test", lambda cancel, progress: release.wait(2), lambda result: None)
+        task = app._task
+        app.disturbance_units.set("%")
+        app._switch_disturbance_units()
+        self.assertIs(app._task, task)
+        app.component_value.set("-")
+        app.disturbance_units.set("Доля")
+        app._switch_disturbance_units()
+        self.assertEqual(app._disturbance_units, "percent")
+        self.assertEqual(app.component_value.get(), "-")
+        self.assertTrue(app.component_error.get())
+        release.set()
+
+    def test_sensitivity_units_change_without_changing_values(self):
+        app = self.app
+        app.sensitivity_parameter.set("Возмущение состава")
+        app.sensitivity_values.set("0,1; 0,25")
+        self.assertEqual(app._parse_sensitivity_values(), (0.1, 0.25))
+        app.disturbance_units.set("%")
+        app._switch_disturbance_units()
+        self.assertEqual(app._parse_sensitivity_values(), (0.1, 0.25))
+        self.assertEqual(app.sensitivity_values.get(), "1E+1; 25")
+
+    def test_learning_route_keeps_free_navigation_and_visits_all_steps(self):
+        app = self.app
+        app.learning_mode.set(False)
+        for page in ("scenarios", "disturbances", "controller", "results", "comparison", "export"):
+            app._advance_learning_step()
+            self.assertEqual(app.current_page, page)
+            self.assertIn(f"{app.learning_step}/6", app.route_stage.get())
+        app._show_page("sensitivity")
+        self.assertEqual(app.current_page, "sensitivity")
+        self.assertEqual(app.learning_step, 6)
+        self.assertEqual(list(app.nav_buttons)[:3], ["scenarios", "disturbances", "dynamics"])
+
     def tearDown(self):
         if hasattr(self, "root"):
             self.root.update_idletasks()
@@ -348,9 +410,15 @@ class GuiStateTests(unittest.TestCase):
                                       lambda *_: None, lambda: None, main.BACKGROUND)
         try:
             editor._load_scenario(scenario)
+            editor._variables["time_constant"].set("10,5")
+            editor._variables["target_gain_min"].set("1,5")
+            editor._variables["target_gain_max"].set("2,5")
             restored = editor._collect_scenario()
+            self.assertEqual(restored["time_constant"], 10.5)
+            self.assertEqual(restored["lesson"]["controller_target"]["gain_min"], 1.5)
+            self.assertEqual(restored["lesson"]["controller_target"]["gain_max"], 2.5)
             self.assertEqual(restored["steady_absolute_tolerance"], 2e-6)
-            self.assertEqual(restored["lesson"]["controller_target"], scenario["lesson"]["controller_target"])
+            self.assertEqual({k: v for k, v in restored["lesson"]["controller_target"].items() if k not in ("gain_min", "gain_max")}, scenario["lesson"]["controller_target"])
         finally:
             editor.destroy()
 

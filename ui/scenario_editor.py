@@ -999,7 +999,7 @@ class ScenarioEditorDialog(tk.Toplevel):
             ):
                 value = self._variables[source].get().strip()
                 if value:
-                    target[destination] = value
+                    target[destination] = parse_nonnegative_number(value)
         return {
             "task": self._lesson_texts["task"].get("1.0", "end-1c"),
             "guidance": self._lesson_texts["guidance"].get("1.0", "end-1c"),

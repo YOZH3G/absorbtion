@@ -48,5 +48,25 @@ class NonnegativeNumberValidationTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 parse_nonnegative_number(value)
 
+class DisturbanceUnitTests(unittest.TestCase):
+    def test_percent_and_decimal_fraction_are_equivalent(self):
+        from app.validation import parse_disturbance
+        for fraction in ("0,1", "0.12345678901234567", "-0.99", "9.99"):
+            from decimal import Decimal
+            percent = str(Decimal(fraction.replace(",", ".")).scaleb(2))
+            self.assertEqual(parse_disturbance(fraction), parse_disturbance(percent, "percent"))
+        for value in ("1000", "-100", "nan", "inf", ""):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                parse_disturbance(value, "percent")
+
+    def test_list_uses_semicolon_or_newline_without_splitting_decimal_comma(self):
+        from app.validation import parse_value_list
+        self.assertEqual(parse_value_list("0,1; 0.25", parse_fraction), (0.1, 0.25))
+        self.assertEqual(parse_value_list("0,1\n0,25", parse_fraction), (0.1, 0.25))
+        for value in ("0,1", "0.1, 0.2", "0.1;", "0.1;;0.2", "0.1;0,10"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                parse_value_list(value, parse_fraction)
+
+
 if __name__ == "__main__":
     unittest.main()

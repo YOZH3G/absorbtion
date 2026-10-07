@@ -1,4 +1,5 @@
 import copy
+from decimal import Decimal
 import json
 import shutil
 import sys
@@ -11,7 +12,7 @@ from matplotlib.colors import ListedColormap
 from matplotlib.figure import Figure
 
 APP_NAME = "Анализ процесса абсорбции"
-APP_VERSION = "1.5.2"
+APP_VERSION = "1.5.3"
 
 from app.calculations import (
     CONTROLLER_TYPES,
@@ -53,7 +54,7 @@ from app.session_store import read_laboratory_session, restore_calculation, vali
 from app.settings_store import SettingsStore
 from app.plotting import adaptive_legend
 from app.simulation import LEAN_GAS, RICH_ABSORBENT, run_simulation, tune_balanced_controller
-from app.validation import parse_fraction, parse_nonnegative_number, parse_positive_number, parse_percentage
+from app.validation import parse_disturbance, parse_value_list, parse_nonnegative_number, parse_positive_number, parse_percentage
 from ui.model_dialog import ModelParametersDialog
 from ui.scenario_editor import ScenarioEditorDialog
 from ui.window_geometry import fit_geometry, work_area
@@ -119,6 +120,10 @@ class AbsorptionApp(ttk.Frame):
 
         self.component_enabled = tk.BooleanVar(value=False)
         self.flow_enabled = tk.BooleanVar(value=False)
+        self.disturbance_units = tk.StringVar(value="Доля")
+        self._disturbance_units = "fraction"
+        self._changing_units = False
+        self.disturbance_units_hint = tk.StringVar(value="Доля: +0.10 = +10%, −0.10 = −10%. Диапазон: −0.99…9.99")
         self.component_value = tk.StringVar()
         self.flow_value = tk.StringVar()
         self.disturbance_type = tk.StringVar(value="Ступенчатое")
@@ -219,7 +224,7 @@ class AbsorptionApp(ttk.Frame):
             value="Закрепите результаты нескольких расчётов для сравнения."
         )
         self.sensitivity_parameter = tk.StringVar(value="Постоянная времени T")
-        self.sensitivity_values = tk.StringVar(value="5, 10, 15, 20")
+        self.sensitivity_values = tk.StringVar(value="5; 10; 15; 20")
         self.sensitivity_summary = tk.StringVar(
             value="Выберите параметр, введите от 2 до 6 значений и постройте семейство кривых."
         )
@@ -339,7 +344,10 @@ class AbsorptionApp(ttk.Frame):
         topbar.grid(row=0, column=0, sticky="ew")
         topbar.columnconfigure(0, weight=1)
         ttk.Label(topbar, text=APP_NAME, style="TopbarTitle.TLabel").grid(row=0, column=0, sticky="w")
-        ttk.Label(topbar, text="Учебный стенд АТПП", style="TopbarMeta.TLabel").grid(row=0, column=1, sticky="e")
+        self.route_stage = tk.StringVar(value="Учебный маршрут")
+        self.route_button = ttk.Button(topbar, textvariable=self.route_stage,
+                                       command=self._advance_learning_step, style="Toolbar.TButton")
+        self.route_button.grid(row=0, column=1, sticky="e")
         ttk.Label(
             topbar,
             textvariable=self.topbar_context,
@@ -369,22 +377,26 @@ class AbsorptionApp(ttk.Frame):
         self.sidebar_meta.grid(row=1, column=0, sticky="w", padx=8, pady=(0, 24))
 
         active_navigation = (
-            ("disturbances", "Возмущения"),
+            ("scenarios", "Задание"),
+            ("disturbances", "Параметры опыта"),
             ("dynamics", "Динамика"),
+            ("controller", "Регулятор"),
             ("results", "Результаты"),
             ("comparison", "Сравнение"),
-            ("controller", "Регулятор"),
+            ("export", "Отчёт"),
             ("sensitivity", "Чувствительность"),
             ("tuning_map", "Карта настроек"),
-            ("scenarios", "Сценарии"),
-            ("export", "Экспорт"),
         )
         self.nav_icons = {
             key: create_icon(self.root, key)
             for key, _label in active_navigation
         }
         self.nav_labels = dict(active_navigation)
+        self.research_label = ttk.Label(self.sidebar, text="Исследование", style="SidebarMeta.TLabel")
+        self.research_label.grid(row=9, column=0, sticky="w", padx=8, pady=(8, 2))
         for row, (key, label) in enumerate(active_navigation, start=2):
+            if row >= 9:
+                row += 1
             button = ttk.Button(
                 self.sidebar,
                 text=label,
@@ -395,8 +407,9 @@ class AbsorptionApp(ttk.Frame):
             )
             button.grid(row=row, column=0, sticky="ew", pady=2)
             self.nav_buttons[key] = button
+            self._attach_tooltip(button, label)
 
-        separator_row = 2 + len(active_navigation)
+        separator_row = 3 + len(active_navigation)
         ttk.Separator(self.sidebar).grid(
             row=separator_row,
             column=0,
@@ -529,6 +542,7 @@ class AbsorptionApp(ttk.Frame):
         self._set_chart_mode(self.chart_mode)
         self._schedule_layout(self._restore_layout)
         self.root.bind("<Configure>", self._adapt_window, add="+")
+        self._update_learning_route()
 
     def _adapt_window(self, event):
         if event.widget != self.root:
@@ -612,15 +626,15 @@ class AbsorptionApp(ttk.Frame):
 
     def _show_page(self, page):
         titles = {
-            "disturbances": "Возмущения",
+            "disturbances": "Параметры опыта",
             "dynamics": "Динамика объекта",
             "results": "Результаты расчёта",
             "comparison": "Сравнение опытов",
             "controller": "Регулятор",
             "sensitivity": "Анализ чувствительности",
             "tuning_map": "Карта настроек регулятора",
-            "scenarios": "Лабораторные сценарии",
-            "export": "Экспорт результатов",
+            "scenarios": "Задание",
+            "export": "Отчёт",
         }
         previous_page = self.current_page
         if previous_page in self.pages and previous_page != page:
@@ -674,11 +688,13 @@ class AbsorptionApp(ttk.Frame):
         if self.sidebar_collapsed:
             self.sidebar_title.grid_remove()
             self.sidebar_meta.grid_remove()
+            self.research_label.grid_remove()
             self.sidebar.configure(padding=(6, 20))
             self.body.columnconfigure(0, minsize=64)
         else:
             self.sidebar_title.grid()
             self.sidebar_meta.grid()
+            self.research_label.grid()
             self.sidebar.configure(padding=(12, 20))
             self.body.columnconfigure(0, minsize=220)
         for key, button in self.nav_buttons.items():
@@ -770,11 +786,15 @@ class AbsorptionApp(ttk.Frame):
         self.flow_entry.grid(row=3, column=2, sticky="ew")
         ttk.Label(card, textvariable=self.flow_error, style="Error.TLabel", wraplength=300).grid(row=4, column=0, columnspan=3, sticky="w", pady=(3, 8))
 
-        ttk.Label(card, text="Доля: +0.10 = увеличение на 10%, −0.10 = уменьшение на 10%. Диапазон: −0.99…9.99", style="Muted.TLabel", wraplength=320).grid(
+        ttk.Label(card, textvariable=self.disturbance_units_hint, style="Muted.TLabel", wraplength=320).grid(
             row=5, column=0, columnspan=3, sticky="w", pady=(2, 14)
         )
 
-        ttk.Separator(card).grid(row=6, column=0, columnspan=3, sticky="ew", pady=(0, 12))
+        units_box = ttk.Combobox(card, textvariable=self.disturbance_units, values=("Доля", "%"),
+                                state="readonly", width=8)
+        units_box.grid(row=6, column=0, columnspan=3, sticky="w", pady=(0, 12))
+        units_box.bind("<<ComboboxSelected>>", self._switch_disturbance_units)
+        self._attach_tooltip(units_box, "Единицы возмущения: доля или относительные проценты")
         ttk.Button(
             card,
             text="Параметры динамики  →",
@@ -989,7 +1009,7 @@ class AbsorptionApp(ttk.Frame):
             style="Body.TLabel", wraplength=330, justify="left",
         ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(0, 12))
         ttk.Label(card, text="Параметр", style="Body.TLabel").grid(row=2, column=0, sticky="w")
-        ttk.Label(card, text="Значения через запятую", style="Body.TLabel").grid(
+        ttk.Label(card, text="Значения через ;", style="Body.TLabel").grid(
             row=2, column=1, sticky="w", padx=(8, 0)
         )
         self.sensitivity_parameter_box = ttk.Combobox(
@@ -1106,7 +1126,11 @@ class AbsorptionApp(ttk.Frame):
                      self.assignment_enabled.get(), self.predicted_direction.get(),
                      steady_prediction, self.predicted_fastest.get(), self.predicted_correction.get()]
         if kind == "sensitivity":
-            signature.extend((self.sensitivity_parameter.get(), self.sensitivity_values.get()))
+            try:
+                values = self._parse_sensitivity_values()
+            except ValueError:
+                values = self.sensitivity_values.get()
+            signature.extend((self.sensitivity_parameter.get(), values))
         elif kind == "map":
             signature.extend(variable.get() for variable in (self.map_controller_type, self.map_gain_min,
                              self.map_gain_max, self.map_integral_min, self.map_integral_max,
@@ -1164,6 +1188,8 @@ class AbsorptionApp(ttk.Frame):
             self._set_status("Расчёт отменён; последний результат сохранён")
 
     def _invalidate_task(self, *_):
+        if self._changing_units:
+            return
         if self._task is not None and self._task_source != self._task_signature(self._task_kind):
             self._cancel_task()
 
@@ -1195,21 +1221,18 @@ class AbsorptionApp(ttk.Frame):
         self._set_status("Анализ чувствительности построен")
 
     def _parse_sensitivity_values(self):
-        source = [item.strip() for item in self.sensitivity_values.get().split(",") if item.strip()]
-        if not 2 <= len(source) <= 6:
-            raise ValueError("Укажите от 2 до 6 значений через запятую.")
         parameter = self.sensitivity_parameter.get()
         parser = (
             parse_positive_number if parameter == "Постоянная времени T"
             else parse_nonnegative_number if parameter == "Запаздывание L"
-            else parse_fraction
+            else lambda value: parse_disturbance(value, self._disturbance_units)
         )
+        self.sensitivity_values_entry.configure(style="TEntry")
         try:
-            values = tuple(parser(item) for item in source)
+            values = parse_value_list(self.sensitivity_values.get(), parser)
         except ValueError as error:
+            self.sensitivity_values_entry.configure(style="Error.TEntry")
             raise ValueError(f"Значения параметра: {error}") from error
-        if len(set(values)) != len(values):
-            raise ValueError("Значения параметра не должны повторяться.")
         return values
 
     def _calculate_tuning_map(self):
@@ -1774,10 +1797,10 @@ class AbsorptionApp(ttk.Frame):
         self.component_enabled.set(scenario["component"] is not None)
         self.flow_enabled.set(scenario["flow"] is not None)
         self.component_value.set(
-            "" if scenario["component"] is None else self._format_number(scenario["component"])
+            "" if scenario["component"] is None else str(Decimal(str(scenario["component"])).scaleb(2 if self._disturbance_units == "percent" else 0))
         )
         self.flow_value.set(
-            "" if scenario["flow"] is None else self._format_number(scenario["flow"])
+            "" if scenario["flow"] is None else str(Decimal(str(scenario["flow"])).scaleb(2 if self._disturbance_units == "percent" else 0))
         )
         self.disturbance_type.set(scenario["disturbance_type"])
         self.start_time.set(self._format_number(scenario["start_time"]))
@@ -1954,29 +1977,75 @@ class AbsorptionApp(ttk.Frame):
         )
 
     def _update_learning_route(self):
-        steps = (
-            "Выберите и примените сценарий",
-            "Сформулируйте прогноз",
-            "Выполните расчёт",
-            "Сравните прогноз с результатом",
-            "Измените настройки регулятора",
-            "Сделайте вывод",
-        )
+        steps = ("Задание", "Параметры опыта", "Регулятор", "Результаты", "Сравнение", "Отчёт")
         if not self.learning_mode.get():
-            self.learning_route.set("Включите режим, чтобы идти по этапам лабораторной работы.")
+            self.learning_route.set("Свободный доступ ко всем разделам. Включите режим для маршрута.")
+            if hasattr(self, "route_stage"):
+                self.route_stage.set("Учебный маршрут")
+                self.route_button.configure(state="normal")
             return
-        self.learning_route.set(
-            " → ".join(
-                f"[{index + 1}] {text}" if index + 1 == self.learning_step else text
-                for index, text in enumerate(steps)
-            )
-        )
+        index = self.learning_step - 1
+        self.learning_route.set(" → ".join(f"[{i + 1}] {text}" if i == index else text
+                                          for i, text in enumerate(steps)))
+        if hasattr(self, "route_stage"):
+            next_step = " → " + steps[index + 1] if index < 5 else ""
+            self.route_stage.set(f"{self.learning_step}/6: {steps[index]}{next_step}")
+            self.route_button.configure(state="normal" if index < 5 else "disabled")
 
     def _advance_learning_step(self):
         if not self.learning_mode.get():
             self.learning_mode.set(True)
-        self.learning_step = min(6, self.learning_step + 1)
+            self.learning_step = 1
+        else:
+            self.learning_step = min(6, self.learning_step + 1)
         self._update_learning_route()
+        self._show_page(("scenarios", "disturbances", "controller", "results", "comparison", "export")[self.learning_step - 1])
+
+    def _set_disturbance_units(self, units):
+        self._disturbance_units = units
+        self.disturbance_units.set("%" if units == "percent" else "Доля")
+        self.disturbance_units_hint.set("Проценты: +10 = +10%, −10 = −10%. Диапазон: −99…999%."
+                                        if units == "percent" else "Доля: +0.10 = +10%, −0.10 = −10%. Диапазон: −0.99…9.99")
+
+    def _switch_disturbance_units(self, _event=None):
+        units = "percent" if self.disturbance_units.get() == "%" else "fraction"
+        if units == self._disturbance_units:
+            return
+        converted = []
+        for variable, error, entry in ((self.component_value, self.component_error, self.component_entry),
+                                       (self.flow_value, self.flow_error, self.flow_entry)):
+            if not variable.get().strip():
+                converted.append("")
+                continue
+            try:
+                value = parse_disturbance(variable.get(), self._disturbance_units)
+            except ValueError as problem:
+                self.disturbance_units.set("%" if self._disturbance_units == "percent" else "Доля")
+                error.set(str(problem))
+                entry.configure(style="Error.TEntry")
+                return
+            converted.append(str(Decimal(variable.get().strip().replace(",", ".")).scaleb(2 if units == "percent" else -2)))
+        sensitivity = None
+        if self.sensitivity_parameter.get() in ("Возмущение состава", "Возмущение расхода"):
+            try:
+                self._parse_sensitivity_values()
+            except ValueError as problem:
+                self.disturbance_units.set("%" if self._disturbance_units == "percent" else "Доля")
+                self.sensitivity_summary.set(str(problem))
+                return
+            sensitivity = "; ".join(str(Decimal(item.strip().replace(",", ".")).scaleb(
+                2 if units == "percent" else -2)) for item in self.sensitivity_values.get().replace("\n", ";").split(";"))
+        self._changing_units = True
+        try:
+            self._set_disturbance_units(units)
+            if sensitivity is not None:
+                self.sensitivity_values.set(sensitivity)
+            for variable, value in zip((self.component_value, self.flow_value), converted):
+                variable.set(value)
+        finally:
+            self._changing_units = False
+        self._mark_result_stale()
+        self._draw_control_diagram()
 
     def _read_prediction(self):
         if not self.assignment_enabled.get():
@@ -2447,6 +2516,11 @@ class AbsorptionApp(ttk.Frame):
                     result[key] = float(value.replace(",", "."))
                 except ValueError:
                     pass
+        units = result.pop("disturbance_units", "fraction")
+        if units == "percent":
+            for key in ("component_value", "flow_value"):
+                if isinstance(result[key], (int, float)):
+                    result[key] = float(Decimal(state[key].replace(",", ".")).scaleb(-2))
         if not result["component_enabled"]:
             result["component_value"] = None
         if not result["flow_enabled"]:
@@ -2464,6 +2538,8 @@ class AbsorptionApp(ttk.Frame):
         return result
 
     def _mark_result_stale(self, *_):
+        if self._changing_units:
+            return
         self._invalidate_task()
         if self.last_calculation is None or "input_state" not in self.last_calculation:
             return
@@ -2481,6 +2557,7 @@ class AbsorptionApp(ttk.Frame):
             "model_version": 2,
             "component_enabled": self.component_enabled.get(),
             "flow_enabled": self.flow_enabled.get(),
+            "disturbance_units": self._disturbance_units,
             "component_value": self.component_value.get(),
             "flow_value": self.flow_value.get(),
             "disturbance_type": self.disturbance_type.get(),
@@ -2513,6 +2590,7 @@ class AbsorptionApp(ttk.Frame):
             restored_model[key] = float(model_values.get(key, restored_model[key]))
         absorption_balance(**restored_model)
         self.model_values = restored_model
+        self._set_disturbance_units(state.get("disturbance_units", "fraction"))
         self._select_chain(state["chain"])
         for key, variable in (
             ("component_enabled", self.component_enabled),
@@ -2899,7 +2977,7 @@ class AbsorptionApp(ttk.Frame):
             canvas.create_text(
                 60,
                 y + 20,
-                text=self._diagram_disturbance_text(symbol, enabled, value),
+                text=self._diagram_disturbance_text(symbol, enabled, value, self._disturbance_units),
                 fill=ACCENT_ACTIVE if enabled else MUTED,
                 font=("Segoe UI", 9, "bold" if enabled else "normal"),
                 width=94,
@@ -2916,11 +2994,11 @@ class AbsorptionApp(ttk.Frame):
         canvas.create_text(215, 155, text=f"Выходная концентрация {output_symbol}", fill=TEXT, font=("Segoe UI", 9, "bold"), width=124)
 
     @staticmethod
-    def _diagram_disturbance_text(symbol, enabled, value):
+    def _diagram_disturbance_text(symbol, enabled, value, units="fraction"):
         if not enabled:
             return f"{symbol}  выключено"
         try:
-            return f"{symbol}  {float(value) * 100:+.1f}%"
+            return f"{symbol}  {parse_disturbance(value, units) * 100:+.1f}%"
         except ValueError:
             return f"{symbol}  активно"
 
@@ -2976,7 +3054,7 @@ class AbsorptionApp(ttk.Frame):
         if not enabled:
             return 0.0
         try:
-            return parse_fraction(value.get())
+            return parse_disturbance(value.get(), self._disturbance_units)
         except ValueError as error:
             error_variable.set(str(error))
             entry.configure(style="Error.TEntry")
@@ -3267,7 +3345,7 @@ class AbsorptionApp(ttk.Frame):
         time = np.linspace(0.0, simulation_duration, 501)
         self._draw_disturbance(time, np.zeros_like(time), 0.0, 0.0)
         self.response_chart_title.set("Кривая разгона")
-        self._style_axis(self.response_axis, "Время", "Концентрация, %")
+        self._style_axis(self.response_axis, "Время, с", "X, %")
         self.response_axis.plot(
             [0, simulation_duration],
             [baseline * 100, baseline * 100],

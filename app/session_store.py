@@ -11,7 +11,7 @@ import numpy as np
 from .calculations import DEFAULT_MODEL_VALUES, IMPULSE, RAMP, RECTANGLE, STEP, absorption_balance
 from .scenario_store import DISTURBANCE_TYPES, normalize_scenario
 from .laboratory import CORRECTION_OPTIONS, DIRECTION_OPTIONS, FASTEST_OPTIONS, normalize_lesson
-from .validation import parse_fraction, parse_nonnegative_number, parse_percentage, parse_positive_number
+from .validation import parse_disturbance, parse_nonnegative_number, parse_percentage, parse_positive_number
 
 
 FORMAT_VERSION = 2
@@ -147,6 +147,9 @@ def validate_input_state(state, *, draft=False):
     for key in ("component_enabled", "flow_enabled", "controller_enabled"):
         if not isinstance(state.get(key), bool):
             raise ValueError(f"Снимок: {key} должно быть логическим значением.")
+    units = state.get("disturbance_units", "fraction")
+    if units not in ("fraction", "percent"):
+        raise ValueError("Снимок: неизвестные единицы возмущения.")
     fields = ("component_value", "flow_value", "disturbance_type", "start_time", "simulation_duration",
               "effect_duration", "time_constant", "delay", "controller_type", "proportional_gain",
               "integral_time", "derivative_time", "control_limit", "setpoint")
@@ -166,8 +169,8 @@ def validate_input_state(state, *, draft=False):
     scenario = {
         "name": "Сеанс", "description": "Сохранённые параметры", "chain": state.get("chain"),
         "model_values": state.get("model_values"), "disturbance_type": state["disturbance_type"],
-        "component": parse_fraction(state["component_value"]) if state["component_enabled"] else 0,
-        "flow": parse_fraction(state["flow_value"]) if state["flow_enabled"] else None,
+        "component": parse_disturbance(state["component_value"], units) if state["component_enabled"] else 0,
+        "flow": parse_disturbance(state["flow_value"], units) if state["flow_enabled"] else None,
         "start_time": parse_nonnegative_number(state["start_time"]),
         "simulation_duration": parse_positive_number(state["simulation_duration"]),
         "effect_duration": (1 if state["disturbance_type"] == "Ступенчатое"

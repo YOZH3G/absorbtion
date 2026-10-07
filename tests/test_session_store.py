@@ -40,6 +40,23 @@ def input_state():
 
 
 class SessionStoreTests(unittest.TestCase):
+    def test_optional_percent_representation_round_trips_without_changing_model(self):
+        state = input_state()
+        fraction = validate_input_state(state)["component"]
+        state.update(disturbance_units="percent", component_value="10,0")
+        self.assertEqual(validate_input_state(state)["component"], fraction)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "units.json"
+            record = run()
+            record["input_state"] = state
+            write_session(path, [record], 3)
+            records, counter = read_session(path)
+            self.assertEqual(records[0]["input_state"], state)
+            self.assertEqual(counter, 3)
+        state["disturbance_units"] = "unknown"
+        with self.assertRaises(ValueError):
+            validate_input_state(state, draft=True)
+
     def test_interrupted_replacement_preserves_last_correct_file_and_backup(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "session.json"
