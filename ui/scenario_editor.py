@@ -2,7 +2,9 @@ import copy
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-from app.calculations import CONTROLLER_TYPES
+from app.calculations import CONTROLLER_TYPES, DEFAULT_MODEL_VALUES
+from app.validation import parse_percentage
+from .model_dialog import ModelParametersDialog
 from app.scenario_store import CHAINS, DISTURBANCE_TYPES, normalize_scenario
 
 
@@ -339,6 +341,16 @@ class ScenarioEditorDialog(tk.Toplevel):
         )
         for row, (label, key) in enumerate(fields, start=1):
             self._entry(tab, row, label, key)
+        self._model_button = ttk.Button(tab, text="Параметры модели", command=self._edit_model)
+        self._model_button.grid(row=6, column=0, columnspan=2, sticky="ew", pady=8)
+        self._normal_widgets.append(self._model_button)
+
+    def _edit_model(self):
+        def apply(values):
+            self._model_values = values
+            self._mark_dirty()
+        ModelParametersDialog(self, self._model_values, DEFAULT_MODEL_VALUES, apply,
+                              lambda: None, self._format_number, self.cget("background"))
 
     def _build_controller_tab(self, tab):
         tab.columnconfigure(1, weight=1)
@@ -361,8 +373,8 @@ class ScenarioEditorDialog(tk.Toplevel):
         self._gain_entry = self._entry(tab, 2, "Коэффициент K", "gain")
         self._integral_entry = self._entry(tab, 3, "Время интегрирования Ti, с", "integral_time")
         self._derivative_entry = self._entry(tab, 4, "Время дифференцирования Td, с", "derivative_time")
-        self._limit_entry = self._entry(tab, 5, "Ограничение |u|", "control_limit")
-        self._setpoint_entry = self._entry(tab, 6, "Задание (пусто = базовое)", "setpoint")
+        self._limit_entry = self._entry(tab, 5, "Предел Δη, п.п.", "control_limit")
+        self._setpoint_entry = self._entry(tab, 6, "Задание, % (пусто = базовое)", "setpoint")
         ttk.Separator(tab).grid(row=7, column=0, columnspan=2, sticky="ew", pady=14)
         self._entry(tab, 8, "Допуск прогноза установившегося значения, %", "steady_tolerance_percent")
 
@@ -515,6 +527,8 @@ class ScenarioEditorDialog(tk.Toplevel):
     def _load_scenario(self, scenario, original_name=None):
         scenario = normalize_scenario(scenario)
         self._loading_form = True
+        self._model_values = scenario["model_values"].copy()
+        self._loaded_model_values = self._model_values.copy()
         controller = scenario["controller"]
         lesson = scenario["lesson"]
         target = lesson["controller_target"] or {}
@@ -538,8 +552,8 @@ class ScenarioEditorDialog(tk.Toplevel):
             "gain": "2" if controller is None else self._format_number(controller["gain"]),
             "integral_time": "20" if controller is None else self._format_number(controller["integral_time"]),
             "derivative_time": "1" if controller is None else self._format_number(controller["derivative_time"]),
-            "control_limit": "100" if controller is None else self._format_number(controller["control_limit"]),
-            "setpoint": "" if controller is None else self._format_optional(controller.get("setpoint")),
+            "control_limit": "100" if controller is None else self._format_number(controller["control_limit"] * 100),
+            "setpoint": "" if controller is None else self._format_optional(None if controller.get("setpoint") is None else controller["setpoint"] * 100),
             "steady_tolerance_percent": self._format_number(scenario.get("steady_tolerance_percent", 5.0)),
             "attempt_limit": str(lesson["attempt_limit"]),
             "target_enabled": bool(target),
@@ -551,7 +565,7 @@ class ScenarioEditorDialog(tk.Toplevel):
             "target_derivative_min": self._format_optional(target.get("derivative_time_min")),
             "target_derivative_max": self._format_optional(target.get("derivative_time_max")),
             "answer_direction": answers.get("direction", ""),
-            "answer_steady": self._format_optional(answers.get("steady")),
+            "answer_steady": self._format_optional(None if answers.get("steady") is None else answers["steady"] * 100),
             "answer_fastest": answers.get("fastest", ""),
             "answer_correction": answers.get("correction", ""),
         }
@@ -589,6 +603,7 @@ class ScenarioEditorDialog(tk.Toplevel):
         lesson_values = {key: text.get("1.0", "end-1c") for key, text in self._lesson_texts.items()}
         self._dirty = (
             self._loaded_values is None
+            or self._model_values != self._loaded_model_values
             or current_values != self._loaded_values
             or lesson_values != self._loaded_lesson_texts
         )
@@ -914,10 +929,11 @@ class ScenarioEditorDialog(tk.Toplevel):
                 "gain": self._variables["gain"].get(),
                 "integral_time": self._variables["integral_time"].get(),
                 "derivative_time": self._variables["derivative_time"].get(),
-                "control_limit": self._variables["control_limit"].get(),
-                "setpoint": None if not setpoint_text else setpoint_text,
+                "control_limit": parse_percentage(self._variables["control_limit"].get()),
+                "setpoint": None if not setpoint_text else parse_percentage(setpoint_text),
             }
         return normalize_scenario({
+            "model_values": self._model_values.copy(),
             "name": self._variables["name"].get(),
             "description": self._variables["description"].get(),
             "chain": CHAIN_LABELS.get(self._variables["chain"].get()),
@@ -945,7 +961,7 @@ class ScenarioEditorDialog(tk.Toplevel):
         for lesson_key, variable_key in answer_keys.items():
             value = self._variables[variable_key].get().strip()
             if value:
-                answers[lesson_key] = value
+                answers[lesson_key] = parse_percentage(value) if lesson_key == "steady" else value
         target = None
         if self._variables["target_enabled"].get():
             target = {"type": self._variables["target_type"].get()}

@@ -1,3 +1,4 @@
+from app.calculations import DEFAULT_MODEL_VALUES, absorption_balance
 import unittest
 
 import numpy as np
@@ -6,14 +7,7 @@ from app.calculations import IMPULSE, RECTANGLE, STEP
 from app.simulation import LEAN_GAS, RICH_ABSORBENT, run_simulation
 
 
-MODEL_VALUES = {
-    "gna": 7800.0,
-    "xa": 0.5,
-    "xg": 0.5,
-    "gg": 1000.0,
-    "xog_initial": 0.8,
-    "xna_initial": 30.0,
-}
+MODEL_VALUES = DEFAULT_MODEL_VALUES.copy()
 
 DYNAMICS = {
     "kind": STEP,
@@ -31,7 +25,7 @@ class SimulationTests(unittest.TestCase):
                         simulation_duration=3.0, delay=0.027)
         controller = dict(controller_type="PID", controller_gain=0.5,
                           integral_time=0.1, derivative_time=0.015,
-                          control_limit=0.3, setpoint=0.8)
+                          control_limit=0.3, setpoint=1 / 6)
         coarse = run_simulation(LEAN_GAS, MODEL_VALUES, 0.1, 0.0, dynamics, controller)
         fine = run_simulation(LEAN_GAS, MODEL_VALUES, 0.1, 0.0, dynamics, controller,
                               max_step=np.min(np.diff(coarse["time"])) / 2)
@@ -42,9 +36,9 @@ class SimulationTests(unittest.TestCase):
         dynamics = dict(DYNAMICS, kind=RECTANGLE, start_time=10.05,
                         effect_duration=0.05, delay=2.037)
         result = run_simulation(LEAN_GAS, MODEL_VALUES, 0.1, 0.0, dynamics)
-        expected = 0.08 * (1.0 - np.exp(-0.05 / 10.0))
+        expected = (float(absorption_balance(**dict(MODEL_VALUES, xg=0.55))["xog"]) - 1 / 6) * (1.0 - np.exp(-0.05 / 10.0))
         self.assertAlmostEqual(result["metrics"]["maximum_deviation"], expected, delta=1e-9)
-        self.assertTrue(np.all(result["final_response"][result["time"] <= 12.087] == 0.8))
+        self.assertTrue(np.all(result["final_response"][result["time"] <= 12.087] == 1 / 6))
 
     def test_impulse_converges_when_step_is_halved(self):
         dynamics = dict(DYNAMICS, kind=IMPULSE, start_time=0.123,
@@ -71,8 +65,8 @@ class SimulationTests(unittest.TestCase):
             dynamics=DYNAMICS,
         )
 
-        self.assertAlmostEqual(result["baseline"], 0.8)
-        self.assertAlmostEqual(result["calculated"], 0.968)
+        self.assertAlmostEqual(result["baseline"], 1 / 6)
+        self.assertAlmostEqual(result["calculated"], 0.55 * 0.2 / (1 - 0.8 * 0.55))
         self.assertAlmostEqual(result["combined_fraction"], 0.21)
         self.assertEqual(result["result_mode"], "Без регулятора")
         self.assertEqual(
@@ -93,8 +87,8 @@ class SimulationTests(unittest.TestCase):
             dynamics=DYNAMICS,
         )
 
-        self.assertEqual(result["baseline"], 30.0)
-        self.assertAlmostEqual(result["calculated"], 25.5)
+        self.assertAlmostEqual(result["baseline"], 0.3)
+        self.assertAlmostEqual(result["calculated"], (7400 * (97 / 370) * 0.85 + 400) / 7800)
 
     def test_closed_loop_returns_controller_signals_and_prediction_data(self):
         controller = {
@@ -102,8 +96,8 @@ class SimulationTests(unittest.TestCase):
             "controller_gain": 1.4,
             "integral_time": 10.0,
             "derivative_time": 0.0,
-            "control_limit": 100.0,
-            "setpoint": 0.8,
+            "control_limit": 1.0,
+            "setpoint": 1 / 6,
         }
 
         result = run_simulation(

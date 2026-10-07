@@ -1,3 +1,4 @@
+from app.calculations import DEFAULT_MODEL_VALUES
 import csv
 import tempfile
 import unittest
@@ -11,6 +12,7 @@ from app.comparison import build_comparison_run, write_comparison_csv
 def calculation_result(settling_time=12.0):
     return {
         "chain": "lean_gas",
+        "model_version": 2, "model_values": DEFAULT_MODEL_VALUES.copy(),
         "time": np.array([0.0, 1.0, 2.0]),
         "final_response": np.array([0.8, 0.82, 0.81]),
         "response_start": 2.0,

@@ -16,6 +16,22 @@ def custom_scenario(name="Пользовательский сценарий"):
 
 
 class ScenarioValidationTests(unittest.TestCase):
+    def test_rejects_disturbed_concentration_above_one(self):
+        scenario = custom_scenario()
+        scenario["component"] = 1.1
+        with self.assertRaises(ValueError):
+            normalize_scenario(scenario)
+
+    def test_model_values_round_trip_without_losing_precision(self):
+        scenario = custom_scenario()
+        scenario["model_values"] = dict(scenario["model_values"], gg=1234.5)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "scenarios.json"
+            store = ScenarioStore(path)
+            store.save(scenario)
+            restored = ScenarioStore(path).user_scenarios[0]
+        self.assertEqual(restored["model_values"], scenario["model_values"])
+
     def test_normalization_adds_optional_defaults(self):
         normalized = normalize_scenario(custom_scenario())
 
@@ -108,18 +124,13 @@ class ScenarioStoreTests(unittest.TestCase):
             "Первая версия.",
         )
 
-    def test_legacy_file_is_migrated_to_new_location(self):
-        legacy_path = self.path.with_name("legacy.json")
-        payload = {
-            "version": FORMAT_VERSION,
-            "scenarios": [custom_scenario()],
-        }
-        legacy_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
-        migrated_path = self.path.with_name("profile") / "scenarios.json"
-
-        store = ScenarioStore(migrated_path, legacy_path=legacy_path)
-
-        self.assertTrue(migrated_path.exists())
+    def test_old_format_is_rejected_without_modifying_current_scenarios(self):
+        store = ScenarioStore(self.path)
+        store.save(custom_scenario())
+        old = self.path.with_name("old.json")
+        old.write_text(json.dumps({"version": 1, "scenarios": [custom_scenario()]}), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "версии 2"):
+            store.import_bundle(old)
         self.assertEqual(len(store.user_scenarios), 1)
 
     def test_import_merges_and_replaces_user_scenarios_by_name(self):

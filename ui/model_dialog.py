@@ -1,7 +1,8 @@
 import tkinter as tk
 from tkinter import ttk
 
-from app.validation import parse_positive_number
+from app.validation import parse_percentage, parse_positive_number
+from app.calculations import absorption_balance
 
 
 class ModelParametersDialog(tk.Toplevel):
@@ -21,10 +22,12 @@ class ModelParametersDialog(tk.Toplevel):
         self._on_close = on_close
         self._format_number = format_number
         self._parsed_values = None
+        self._initial_values = dict(values)
         self._variables = {
-            key: tk.StringVar(value=format_number(value))
+            key: tk.StringVar(value=format_number(value * 100 if key in ("xg", "xa", "eta") else value))
             for key, value in values.items()
         }
+        self._initial_text = {key: variable.get() for key, variable in self._variables.items()}
         self._errors = {key: tk.StringVar() for key in self._variables}
         self._entries = {}
 
@@ -47,19 +50,18 @@ class ModelParametersDialog(tk.Toplevel):
         )
         ttk.Label(
             content,
-            text="Все изменения применяются одновременно. Допустимы конечные числа больше нуля.",
+            text="Расходы — кг/ч; концентрации и η — от 0 до 100%. Выходы рассчитываются по балансу.",
             style="Status.TLabel",
         ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(4, 16))
 
         gas_specs = (
-            ("gg", "Расход газовой смеси", "Gг"),
-            ("xg", "Доля компонента в исходном газе", "Xг"),
-            ("xog_initial", "Начальная концентрация обеднённого газа", "Xог₀"),
+            ("gg", "Входной расход газа, кг/ч", "Gг"),
+            ("xg", "Концентрация входного газа, %", "Xг"),
+            ("eta", "Степень извлечения, %", "η"),
         )
         absorbent_specs = (
-            ("gna", "Расход насыщенного абсорбента", "Gна"),
-            ("xa", "Состав исходного абсорбента", "Xа"),
-            ("xna_initial", "Начальная концентрация насыщенного абсорбента", "Xна₀"),
+            ("ga", "Входной расход абсорбента, кг/ч", "Gа"),
+            ("xa", "Концентрация входного абсорбента, %", "Xа"),
         )
         self._build_parameter_group(content, 0, "Газовая часть", gas_specs)
         self._build_parameter_group(content, 1, "Абсорбент", absorbent_specs)
@@ -70,20 +72,21 @@ class ModelParametersDialog(tk.Toplevel):
         ttk.Label(derived, text="Расчётные значения", style="CardTitle.TLabel").grid(
             row=0, column=0, columnspan=4, sticky="w", pady=(0, 8)
         )
-        self._gog_value = tk.StringVar(value="—")
-        self._ga_value = tk.StringVar(value="—")
-        ttk.Label(derived, text="Gог — расход обеднённого газа", style="Body.TLabel").grid(
-            row=1, column=0, sticky="w"
-        )
-        ttk.Label(derived, textvariable=self._gog_value, style="ResultValue.TLabel").grid(
-            row=1, column=1, sticky="w", padx=(8, 28)
-        )
-        ttk.Label(derived, text="Gа — расход абсорбента", style="Body.TLabel").grid(
-            row=1, column=2, sticky="w"
-        )
-        ttk.Label(derived, textvariable=self._ga_value, style="ResultValue.TLabel").grid(
-            row=1, column=3, sticky="w", padx=(8, 0)
-        )
+        self._derived_values = {}
+        for row, (key, label) in enumerate((
+            ("j", "J — перенос компонента, кг/ч"),
+            ("gog", "Gог — выходной расход газа, кг/ч"),
+            ("gna", "Gна — выходной расход жидкости, кг/ч"),
+            ("xog", "Xог — выходная концентрация газа, %"),
+            ("xna", "Xна — выходная концентрация жидкости, %"),
+        ), start=1):
+            variable = tk.StringVar(value="—")
+            self._derived_values[key] = variable
+            ttk.Label(derived, text=label, style="Body.TLabel").grid(row=row, column=0, sticky="w")
+            ttk.Label(derived, textvariable=variable, style="ResultValue.TLabel").grid(row=row, column=1, sticky="w", padx=12)
+        self._balance_error = tk.StringVar()
+        ttk.Label(derived, textvariable=self._balance_error, style="Error.TLabel", wraplength=560).grid(row=6, column=0, columnspan=4, sticky="w")
+        ttk.Label(derived, text="Условная степень извлечения; равновесие и кинетика массопередачи не рассчитываются", style="Muted.TLabel", wraplength=560).grid(row=7, column=0, columnspan=4, sticky="w")
 
         actions = ttk.Frame(content, style="App.TFrame")
         actions.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(18, 0))
@@ -142,7 +145,10 @@ class ModelParametersDialog(tk.Toplevel):
         valid = True
         for key, variable in self._variables.items():
             try:
-                parsed[key] = parse_positive_number(variable.get())
+                parsed[key] = (parse_percentage(variable.get()) if key in ("xg", "xa", "eta")
+                               else parse_positive_number(variable.get()))
+                if variable.get() == self._initial_text[key]:
+                    parsed[key] = self._initial_values[key]
                 self._errors[key].set("")
                 self._entries[key].configure(style="TEntry")
             except ValueError as error:
@@ -150,20 +156,24 @@ class ModelParametersDialog(tk.Toplevel):
                 self._entries[key].configure(style="Error.TEntry")
                 valid = False
 
+        self._balance_error.set("")
         if valid:
-            self._gog_value.set(self._format_number(parsed["gg"] * parsed["xg"] / parsed["xog_initial"]))
-            self._ga_value.set(self._format_number(parsed["gna"] * parsed["xna_initial"] / parsed["xa"]))
-            self._parsed_values = parsed
-            self._apply_button.configure(state="normal")
-        else:
-            self._gog_value.set("—")
-            self._ga_value.set("—")
-            self._parsed_values = None
-            self._apply_button.configure(state="disabled")
+            try:
+                balance = absorption_balance(**parsed)
+            except ValueError as error:
+                self._balance_error.set(str(error))
+                valid = False
+        self._parsed_values = parsed if valid else None
+        for key, variable in self._derived_values.items():
+            variable.set(self._format_number(float(balance[key]) * (100 if key in ("xog", "xna") else 1)) if valid else "—")
+        self._apply_button.configure(state="normal" if valid else "disabled")
 
     def _restore_defaults(self):
-        for key, value in self._defaults.items():
-            self._variables[key].set(self._format_number(value))
+        self._initial_values = dict(self._defaults)
+        self._initial_text = {key: self._format_number(value * (100 if key in ("xg", "xa", "eta") else 1))
+                              for key, value in self._defaults.items()}
+        for key, text in self._initial_text.items():
+            self._variables[key].set(text)
 
     def _apply_values(self):
         self._validate_values()

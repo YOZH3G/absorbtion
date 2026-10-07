@@ -1,11 +1,9 @@
 import numpy as np
 
 from .calculations import (
-    calculate_xna,
-    calculate_xog,
+    absorption_balance,
+    MODEL_FORMAT_VERSION,
     combine_fractions,
-    controller_response,
-    controller_steady_state,
     disturbance_profile,
     first_order_response,
     transition_metrics,
@@ -36,7 +34,7 @@ def simulation_time_grid(dynamics, controller=None, max_step=None):
         step = min(step, duration / 40)
         events.extend([start + duration, start + duration + delay])
     if controller is not None:
-        gain = controller["controller_gain"]
+        gain = controller["controller_gain"] * controller.get("process_gain", 1.0)
         step = min(step, time_constant / (100 * max(1.0, gain)))
         if "I" in controller["controller_type"]:
             step = min(step, controller["integral_time"] / (100 * max(1.0, gain)))
@@ -61,36 +59,137 @@ def simulation_time_grid(dynamics, controller=None, max_step=None):
     return np.sort(grid)
 
 
+def disturbed_inputs(chain, model_values, component, flow):
+    if chain not in (LEAN_GAS, RICH_ABSORBENT):
+        raise ValueError(f"Неизвестная цепь управления: {chain}")
+    values = dict(model_values)
+    values["xg" if chain == LEAN_GAS else "xa"] *= 1 + component
+    values["gg" if chain == LEAN_GAS else "ga"] *= 1 + flow
+    return values
+
+
 def _chain_calculator(chain, model_values):
+    output = "xog" if chain == LEAN_GAS else "xna"
+    baseline = float(absorption_balance(**model_values)[output])
+
+    def calculate(component, flow):
+        return absorption_balance(**disturbed_inputs(chain, model_values, component, flow))[output]
+
+    # Validate the chain even when both disturbances are zero.
+    calculate(0.0, 0.0)
+    return baseline, calculate
+
+
+def eta_gain(chain, values):
+    gg, xg, ga, xa, eta = (values[key] for key in ("gg", "xg", "ga", "xa", "eta"))
     if chain == LEAN_GAS:
-        baseline = model_values["xog_initial"]
-        outlet_flow = model_values["gg"] * model_values["xg"] / baseline
+        return -xg * (1 - xg) / (1 - eta * xg) ** 2
+    return gg * xg * ga * (1 - xa) / (ga + eta * gg * xg) ** 2
 
-        def calculate(component, flow):
-            return calculate_xog(
-                model_values["gg"],
-                model_values["xg"],
-                outlet_flow,
-                component,
-                flow,
-            )
 
-        return baseline, calculate
-    if chain == RICH_ABSORBENT:
-        baseline = model_values["xna_initial"]
-        absorbent_flow = model_values["gna"] * baseline / model_values["xa"]
+def tune_balanced_controller(chain, values, controller_type, time_constant, delay):
+    from .calculations import tune_controller_parameters
 
-        def calculate(component, flow):
-            return calculate_xna(
-                absorbent_flow,
-                model_values["gna"],
-                model_values["xa"],
-                component,
-                flow,
-            )
+    absorption_balance(**values)
+    gain = abs(eta_gain(chain, values))
+    if gain <= 1e-12:
+        raise ValueError("В этом режиме выбранная концентрация не зависит от η; автоподбор невозможен.")
+    tuning = tune_controller_parameters(controller_type, time_constant, delay)
+    tuning["proportional_gain"] /= gain
+    return tuning
 
-        return baseline, calculate
-    raise ValueError(f"Неизвестная цепь управления: {chain}")
+
+def _eta_bounds(values, controller):
+    limit = controller["control_limit"]
+    if not np.isfinite(limit) or not 0 < limit <= 1:
+        raise ValueError("Ограничение изменения η должно быть больше 0 и не больше 1.")
+    return max(0.0, values["eta"] - limit), min(1.0, values["eta"] + limit)
+
+
+def eta_steady_state(chain, values, controller):
+    output = "xog" if chain == LEAN_GAS else "xna"
+    direction = -1 if chain == LEAN_GAS else 1
+    low, high = _eta_bounds(values, controller)
+
+    def value(eta):
+        return float(absorption_balance(**dict(values, eta=eta))[output])
+
+    if controller["controller_gain"] == 0:
+        return value(values["eta"])
+    setpoint = controller["setpoint"]
+    if "I" in controller["controller_type"]:
+        return float(np.clip(setpoint, min(value(low), value(high)), max(value(low), value(high))))
+    # Unique static P/PD equilibrium, including a saturated actuator.
+    for _ in range(60):
+        eta = (low + high) / 2
+        commanded = values["eta"] + direction * controller["controller_gain"] * (setpoint - value(eta))
+        if eta < commanded:
+            low = eta
+        else:
+            high = eta
+    return value((low + high) / 2)
+
+
+def eta_controller_response(time, chain, values, component, flow, dynamics, controller, delayed_profile):
+    """One controller changes η; both phase targets follow the common balance."""
+    kind = controller["controller_type"]
+    gain = controller["controller_gain"]
+    ti, td = controller["integral_time"], controller["derivative_time"]
+    setpoint = controller["setpoint"]
+    if kind not in ("P", "PI", "PD", "PID"):
+        raise ValueError("Неизвестный тип регулятора.")
+    if not np.all(np.isfinite([gain, ti, td, setpoint])) or gain < 0 or td < 0:
+        raise ValueError("Параметры регулятора должны быть конечными и неотрицательными.")
+    if "I" in kind and ti <= 0:
+        raise ValueError("Время интегрирования Ti должно быть больше нуля.")
+    if not 0 <= setpoint <= 1:
+        raise ValueError("Задание концентрации должно быть в диапазоне 0…1.")
+    low, high = _eta_bounds(values, controller)
+    inputs = disturbed_inputs(chain, values, component * delayed_profile, flow * delayed_profile)
+    # Validate every disturbed concentration and both ends of the actuator range.
+    absorption_balance(**dict(inputs, eta=low))
+    absorption_balance(**dict(inputs, eta=high))
+    gg, xg, ga, xa = [np.broadcast_to(inputs[key], time.shape) for key in ("gg", "xg", "ga", "xa")]
+    baseline = absorption_balance(**values)
+    phases = {key: np.empty_like(time) for key in ("xog", "xna")}
+    for key in phases:
+        phases[key][0] = baseline[key]
+    output = "xog" if chain == LEAN_GAS else "xna"
+    direction = -1 if chain == LEAN_GAS else 1
+    control = np.empty_like(time)
+    integral = 0.0
+    steps = np.diff(time)
+    decays = np.exp(-steps / dynamics["time_constant"])
+    for index in range(time.size):
+        error = setpoint - phases[output][index]
+        derivative = (0.0 if index == 0 else
+                      -(phases[output][index] - phases[output][index - 1]) / steps[index - 1])
+        step = steps[index] if index < steps.size else 0.0
+        candidate_integral = integral + error * step if "I" in kind else 0.0
+
+        def command(accumulated):
+            return values["eta"] + direction * gain * (
+                error + (accumulated / ti if "I" in kind else 0.0)
+                + (td * derivative if "D" in kind else 0.0))
+
+        candidate = command(candidate_integral)
+        clipped = np.clip(candidate, low, high)
+        if "I" in kind and (candidate - clipped) * direction * error <= 0:
+            integral = candidate_integral
+        elif "I" in kind and gain > 0:
+            integral = ti * ((clipped - values["eta"]) / (direction * gain)
+                             - error - (td * derivative if "D" in kind else 0.0))
+        control[index] = clipped
+        if index == steps.size:
+            break
+        delayed_eta = np.interp(time[index] - dynamics["delay"], time[:index + 1],
+                                control[:index + 1], left=values["eta"])
+        transfer = delayed_eta * gg[index] * xg[index]
+        targets = {"xog": (gg[index] * xg[index] - transfer) / (gg[index] - transfer),
+                   "xna": (ga[index] * xa[index] + transfer) / (ga[index] + transfer)}
+        for key in phases:
+            phases[key][index + 1] = targets[key] + (phases[key][index] - targets[key]) * decays[index]
+    return phases, setpoint - phases[output], control
 
 
 def run_simulation(
@@ -108,6 +207,8 @@ def run_simulation(
 
     combined_fraction = combine_fractions(component_fraction, flow_fraction)
     calculated = calculate(component_fraction, flow_fraction)
+    if controller is not None:
+        controller = dict(controller, process_gain=abs(eta_gain(chain, model_values)))
     time = simulation_time_grid(dynamics, controller, max_step)
     profile = disturbance_profile(
         time,
@@ -153,6 +254,7 @@ def run_simulation(
     )
 
     controlled_response = None
+    controlled_phases = None
     error = None
     control = None
     if controller is None:
@@ -161,28 +263,16 @@ def run_simulation(
         response_start = dynamics["start_time"] + dynamics["delay"]
         result_mode = "Без регулятора"
     else:
-        controlled_response, error, control = controller_response(
-            time,
-            baseline,
-            targets["Совместное воздействие"],
-            dynamics["time_constant"],
-            controller["controller_type"],
-            controller["controller_gain"],
-            controller["integral_time"],
-            controller["derivative_time"],
-            controller["control_limit"],
-            controller["setpoint"],
-            dynamics["delay"],
-            delayed_disturbance=delayed_targets["Совместное воздействие"],
+        controlled_phases, error, control = eta_controller_response(
+            time, chain, model_values, component_fraction, flow_fraction,
+            dynamics, controller, delayed_profile,
         )
+        controlled_response = controlled_phases["xog" if chain == LEAN_GAS else "xna"]
         final_response = controlled_response
-        steady_state = controller_steady_state(
-            targets["Совместное воздействие"][-1],
-            controller["setpoint"],
-            controller["controller_type"],
-            controller["controller_gain"],
-            controller["control_limit"],
-        )
+        terminal_inputs = disturbed_inputs(chain, model_values,
+                                           component_fraction * profile[-1],
+                                           flow_fraction * profile[-1])
+        steady_state = eta_steady_state(chain, terminal_inputs, controller)
         metrics = transition_metrics(
             time,
             controlled_response,
@@ -196,6 +286,14 @@ def run_simulation(
             else dynamics["start_time"] + dynamics["delay"]
         )
         result_mode = f"С {controller['controller_type']}-регулятором"
+
+    reachable = None
+    if controller is not None:
+        low, high = _eta_bounds(terminal_inputs, controller)
+        output = "xog" if chain == LEAN_GAS else "xna"
+        bounds = [float(absorption_balance(**dict(terminal_inputs, eta=eta))[output])
+                  for eta in (low, high)]
+        reachable = min(bounds) <= controller["setpoint"] <= max(bounds)
 
     open_duration = _settling_duration(
         open_metrics["settling_time"],
@@ -218,6 +316,16 @@ def run_simulation(
 
     return {
         "chain": chain,
+        "model_version": MODEL_FORMAT_VERSION,
+        "model_values": dict(model_values),
+        "setpoint_reachable": reachable,
+        "stationary_balance": absorption_balance(**disturbed_inputs(chain, model_values, component_fraction, flow_fraction)),
+        "phase_responses": controlled_phases if controlled_phases is not None else {
+            key: first_order_response(time, float(absorption_balance(**model_values)[key]),
+                absorption_balance(**disturbed_inputs(chain, model_values,
+                    component_fraction * delayed_profile, flow_fraction * delayed_profile))[key],
+                dynamics["time_constant"]) for key in ("xog", "xna")
+        },
         "component_fraction": component_fraction,
         "flow_fraction": flow_fraction,
         "combined_fraction": combined_fraction,

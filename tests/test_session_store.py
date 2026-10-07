@@ -1,3 +1,4 @@
+from app.calculations import DEFAULT_MODEL_VALUES
 import tempfile
 import unittest
 import json
@@ -13,6 +14,7 @@ def run():
         "id": "run-3",
         "name": "Опыт 3",
         "chain": "lean_gas",
+        "model_version": 2, "model_values": DEFAULT_MODEL_VALUES.copy(),
         "time": np.array([0.0, 1.0]),
         "response": np.array([0.8, 0.81]),
         "time_constant": 10.0,
@@ -44,7 +46,7 @@ class SessionStoreTests(unittest.TestCase):
             path = Path(directory) / "invalid.json"
             invalid["time"] = [0.0, 1.0]
             path.write_text(
-                json.dumps({"version": 1, "comparison_counter": 1, "runs": [invalid]}),
+                json.dumps({"version": 2, "comparison_counter": 1, "runs": [invalid]}),
                 encoding="utf-8",
             )
             with self.assertRaisesRegex(ValueError, "одномерным"):

@@ -5,12 +5,12 @@ import os
 import shutil
 from pathlib import Path
 
-from .calculations import CONTROLLER_TYPES
+from .calculations import CONTROLLER_TYPES, DEFAULT_MODEL_VALUES, absorption_balance
 from .laboratory import SCENARIOS, normalize_lesson
 from .validation import MAX_FRACTION, MIN_FRACTION
 
 
-FORMAT_VERSION = 1
+FORMAT_VERSION = 2
 DISTURBANCE_TYPES = (
     "Ступенчатое",
     "Импульсное",
@@ -20,20 +20,15 @@ DISTURBANCE_TYPES = (
 CHAINS = ("lean_gas", "rich_absorbent")
 APP_DIRECTORY_NAME = "AbsorptionTrainer"
 USER_FILE_NAME = "scenarios.json"
-LEGACY_USER_FILE = Path(__file__).with_name(USER_FILE_NAME)
 
 
 class ScenarioStore:
-    def __init__(self, path=None, legacy_path=None):
+    def __init__(self, path=None):
         self.path = Path(path) if path is not None else default_user_file()
         self.backup_path = self.path.with_suffix(self.path.suffix + ".bak")
         self.user_scenarios = []
         self.warning = None
         self.recovery_available = False
-        if path is None or legacy_path is not None:
-            self._migrate_legacy_file(
-                LEGACY_USER_FILE if legacy_path is None else Path(legacy_path)
-            )
         self.reload()
 
     @property
@@ -164,15 +159,6 @@ class ScenarioStore:
         self.warning = None
         self.recovery_available = False
 
-    def _migrate_legacy_file(self, legacy_path):
-        if self.path.exists() or not legacy_path.exists() or legacy_path == self.path:
-            return
-        try:
-            scenarios = _read_user_bundle(legacy_path, self.builtin_names)
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            _write_bundle(self.path, scenarios)
-        except (OSError, ValueError, json.JSONDecodeError):
-            return
 
 
 def user_data_directory():
@@ -195,6 +181,12 @@ def default_user_file():
 def normalize_scenario(scenario):
     if not isinstance(scenario, dict):
         raise ValueError("Сценарий должен быть объектом JSON.")
+
+    model_values = scenario.get("model_values", DEFAULT_MODEL_VALUES)
+    if not isinstance(model_values, dict) or set(model_values) != set(DEFAULT_MODEL_VALUES):
+        raise ValueError("Нужны параметры модели Gг, Xг, Gа, Xа и η.")
+    model_values = {key: _number(value, key) for key, value in model_values.items()}
+    absorption_balance(**model_values)
 
     name = _required_text(scenario.get("name"), "Название")
     description = _required_text(scenario.get("description"), "Описание")
@@ -242,8 +234,18 @@ def normalize_scenario(scenario):
     )
 
     controller = _normalize_controller(scenario.get("controller"))
+    disturbed = dict(model_values)
+    disturbed["xg" if chain == "lean_gas" else "xa"] *= 1 + (component or 0)
+    disturbed["gg" if chain == "lean_gas" else "ga"] *= 1 + (flow or 0)
+    absorption_balance(**disturbed)
+    if controller is not None:
+        for inputs in (model_values, disturbed):
+            for eta in (max(0, model_values["eta"] - controller["control_limit"]),
+                        min(1, model_values["eta"] + controller["control_limit"])):
+                absorption_balance(**dict(inputs, eta=eta))
     lesson = normalize_lesson(scenario.get("lesson"))
     return {
+        "model_values": model_values,
         "name": name,
         "description": description,
         "chain": chain,
@@ -271,7 +273,7 @@ def _normalize_controller(controller):
         raise ValueError("Выберите допустимый тип регулятора.")
     setpoint = controller.get("setpoint")
     if setpoint is not None:
-        setpoint = _number(setpoint, "Заданное значение", minimum=0.0, strict=True)
+        setpoint = _number(setpoint, "Задание концентрации", minimum=0.0, maximum=1.0)
     return {
         "type": controller_type,
         "gain": _number(controller.get("gain"), "Коэффициент K", minimum=0.0),
@@ -290,6 +292,7 @@ def _normalize_controller(controller):
             controller.get("control_limit"),
             "Ограничение управляющего воздействия",
             minimum=0.0,
+            maximum=1.0,
             strict=True,
         ),
         "setpoint": setpoint,
@@ -303,6 +306,8 @@ def _read_bundle(path):
     scenarios = payload.get("scenarios")
     if not isinstance(scenarios, list):
         raise ValueError("Поле scenarios должно содержать список.")
+    if any(not isinstance(scenario, dict) or "model_values" not in scenario for scenario in scenarios):
+        raise ValueError("Каждый сценарий версии 2 должен содержать параметры модели.")
     return [normalize_scenario(scenario) for scenario in scenarios]
 
 

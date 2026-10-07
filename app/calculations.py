@@ -7,6 +7,33 @@ RECTANGLE = "rectangle"
 RAMP = "ramp"
 
 CONTROLLER_TYPES = ("P", "PI", "PID", "PD")
+MODEL_FORMAT_VERSION = 2
+DEFAULT_MODEL_VALUES = {"gg": 1000.0, "xg": 0.5, "ga": 7400.0,
+                        "xa": 97.0 / 370.0, "eta": 0.8}
+
+
+def absorption_balance(gg, xg, ga, xa, eta):
+    """Return the common stationary mass balance; fractions are always 0..1."""
+    gg, xg, ga, xa, eta = np.broadcast_arrays(
+        *[np.asarray(value, dtype=float) for value in (gg, xg, ga, xa, eta)]
+    )
+    if not all(np.all(np.isfinite(value)) for value in (gg, xg, ga, xa, eta)):
+        raise ValueError("Параметры баланса должны быть конечными числами.")
+    if np.any(gg <= 0) or np.any(ga <= 0):
+        raise ValueError("Входные расходы газа и абсорбента должны быть больше нуля.")
+    if any(np.any((value < 0) | (value > 1)) for value in (xg, xa, eta)):
+        raise ValueError("Концентрации и степень извлечения должны быть в диапазоне 0…1.")
+    transfer = eta * gg * xg
+    gog = gg - transfer
+    gna = ga + transfer
+    if np.any(gog <= 0) or np.any(gna <= 0):
+        raise ValueError("Выходной расход должен быть больше нуля: при Xг=100% и η=100% "
+                         "концентрация остаточного газа не определена.")
+    xog = (gg * xg - transfer) / gog
+    xna = (ga * xa + transfer) / gna
+    return {"j": transfer, "gog": gog, "gna": gna, "xog": xog, "xna": xna,
+            "mass_residual": gg + ga - gog - gna,
+            "component_residual": gg * xg + ga * xa - gog * xog - gna * xna}
 
 
 def _validate_time_series(time, target):
@@ -28,16 +55,6 @@ def _controller_features(controller_type):
 def combine_fractions(first, second):
     """Return the combined relative change for two independent fractions."""
     return (1 + first) * (1 + second) - 1
-
-
-def calculate_xog(gg, xg, gog, k_xg=0.0, k_gg=0.0):
-    """Calculate lean-gas concentration after composition and flow changes."""
-    return (gg * (1 + k_gg) * xg * (1 + k_xg)) / gog
-
-
-def calculate_xna(ga, gna, xa, k_xa=0.0, k_ga=0.0):
-    """Calculate rich-absorbent concentration after composition and flow changes."""
-    return (ga * (1 + k_ga) / gna) * xa * (1 + k_xa)
 
 
 def disturbance_profile(time, kind, start_time, duration):
@@ -130,209 +147,6 @@ def transition_metrics(time, response, target, baseline, settling_band=0.05):
         "settling_time": settling_time,
         "static_error": float(baseline - steady_state),
     }
-
-
-def controller_response(
-    time,
-    baseline,
-    disturbance_target,
-    time_constant,
-    controller_type,
-    controller_gain,
-    integral_time,
-    derivative_time,
-    control_limit,
-    setpoint,
-    delay=0.0,
-    *,
-    delayed_disturbance=None,
-):
-    """Simulate a first-order object controlled by a selected ideal controller."""
-    time, disturbance_target = _validate_time_series(time, disturbance_target)
-    if time_constant <= 0:
-        raise ValueError("Постоянная времени должна быть больше нуля.")
-    uses_integral, uses_derivative = _controller_features(controller_type)
-    if controller_gain < 0:
-        raise ValueError("Коэффициент K не может быть отрицательным.")
-    if uses_integral and integral_time <= 0:
-        raise ValueError("Время интегрирования Ti должно быть больше нуля.")
-    if uses_derivative and derivative_time < 0:
-        raise ValueError("Время дифференцирования Td не может быть отрицательным.")
-    if control_limit <= 0:
-        raise ValueError("Ограничение управляющего воздействия должно быть больше нуля.")
-    if delay < 0:
-        raise ValueError("Запаздывание не может быть отрицательным.")
-    if not np.all(np.isfinite(disturbance_target)) or not np.all(
-        np.isfinite([
-            baseline,
-            controller_gain,
-            integral_time,
-            derivative_time,
-            control_limit,
-            setpoint,
-            delay,
-        ])
-    ):
-        raise ValueError("Параметры модели регулятора должны быть конечными числами.")
-
-    response = np.empty_like(time)
-    error = np.empty_like(time)
-    control = np.empty_like(time)
-    response[0] = baseline
-    integral = 0.0
-    steps = np.diff(time)
-    decays = np.exp(-steps / time_constant)
-    delayed_times = time[:-1] - delay
-    if delayed_disturbance is None:
-        delayed_disturbance = np.interp(
-            delayed_times, time, disturbance_target,
-            left=baseline, right=disturbance_target[-1],
-        )
-    else:
-        _time, delayed_disturbance = _validate_time_series(time, delayed_disturbance)
-    delayed_control_indices = np.searchsorted(time, delayed_times, side="right") - 1
-    delayed_control_weights = np.zeros_like(delayed_times)
-    interpolated = (
-        (delayed_control_indices >= 0)
-        & (delayed_control_indices + 1 < time.size)
-    )
-    lower_indices = delayed_control_indices[interpolated]
-    delayed_control_weights[interpolated] = (
-        delayed_times[interpolated] - time[lower_indices]
-    ) / (time[lower_indices + 1] - time[lower_indices])
-
-    def calculate_control(current_error, integral_value, derivative_value):
-        proportional_term = current_error if "P" in controller_type else 0.0
-        integral_term = integral_value / integral_time if uses_integral else 0.0
-        derivative_term = derivative_time * derivative_value if uses_derivative else 0.0
-        return controller_gain * (proportional_term + integral_term + derivative_term)
-
-    def clamp_control(value):
-        return min(control_limit, max(-control_limit, value))
-
-    for index in range(1, time.size):
-        step = steps[index - 1]
-        error[index - 1] = setpoint - response[index - 1]
-        derivative = (
-            0.0
-            if index == 1
-            else -(response[index - 1] - response[index - 2])
-            / steps[index - 2]
-        )
-        candidate_integral = (
-            integral + error[index - 1] * step
-            if uses_integral
-            else integral
-        )
-        candidate_control = calculate_control(
-            error[index - 1],
-            candidate_integral,
-            derivative,
-        )
-        saturated_control = clamp_control(candidate_control)
-        if uses_integral and (
-            candidate_control == saturated_control
-            or candidate_control * error[index - 1] < 0
-        ):
-            integral = candidate_integral
-
-        control[index - 1] = clamp_control(
-            calculate_control(error[index - 1], integral, derivative)
-        )
-        delay_index = index - 1
-        lower_index = delayed_control_indices[delay_index]
-        if delayed_times[delay_index] < time[0]:
-            delayed_control = 0.0
-        elif lower_index >= index - 1:
-            delayed_control = control[index - 1]
-        else:
-            weight = delayed_control_weights[delay_index]
-            delayed_control = (
-                control[lower_index]
-                + weight * (control[lower_index + 1] - control[lower_index])
-            )
-        interval_target = delayed_disturbance[delay_index] + delayed_control
-        decay = decays[delay_index]
-        response[index] = interval_target + (response[index - 1] - interval_target) * decay
-
-    error[-1] = setpoint - response[-1]
-    final_derivative = (
-        0.0
-        if time.size == 1
-        else -(response[-1] - response[-2]) / (time[-1] - time[-2])
-    )
-    control[-1] = clamp_control(
-        calculate_control(error[-1], integral, final_derivative)
-    )
-    return response, error, control
-
-
-def pi_control_response(
-    time,
-    baseline,
-    disturbance_target,
-    time_constant,
-    proportional_gain,
-    integral_time,
-    control_limit,
-    setpoint,
-    delay=0.0,
-):
-    """Simulate the PI variant while preserving the existing public function."""
-    return controller_response(
-        time,
-        baseline,
-        disturbance_target,
-        time_constant,
-        "PI",
-        proportional_gain,
-        integral_time,
-        0.0,
-        control_limit,
-        setpoint,
-        delay,
-    )
-
-
-def controller_steady_state(
-    disturbance_steady_state,
-    setpoint,
-    controller_type,
-    controller_gain,
-    control_limit,
-):
-    """Return the theoretical steady output for the selected controller type."""
-    uses_integral, _uses_derivative = _controller_features(controller_type)
-    if controller_gain < 0:
-        raise ValueError("Коэффициент K не может быть отрицательным.")
-    if control_limit <= 0:
-        raise ValueError("Ограничение управляющего воздействия должно быть больше нуля.")
-    if not np.all(np.isfinite([
-        disturbance_steady_state,
-        setpoint,
-        controller_gain,
-        control_limit,
-    ])):
-        raise ValueError("Параметры установившегося режима должны быть конечными числами.")
-
-    if controller_gain == 0:
-        return float(disturbance_steady_state)
-    if uses_integral:
-        required_control = setpoint - disturbance_steady_state
-    else:
-        unconstrained_output = (
-            disturbance_steady_state + controller_gain * setpoint
-        ) / (1.0 + controller_gain)
-        required_control = controller_gain * (setpoint - unconstrained_output)
-    return float(
-        disturbance_steady_state
-        + np.clip(required_control, -control_limit, control_limit)
-    )
-
-
-def tune_pi_parameters(time_constant, delay):
-    """Tune a PI controller for the unity-gain first-order object using an IMC rule."""
-    return tune_controller_parameters("PI", time_constant, delay)
 
 
 def tune_controller_parameters(controller_type, time_constant, delay):

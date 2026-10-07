@@ -137,6 +137,11 @@ def classify_controller_result(result):
         return "Колебания"
     control = result["control"]
     controller = result["controller"]
-    if controller is not None and np.any(np.isclose(np.abs(control), controller["control_limit"], rtol=0.0, atol=1e-8)):
-        return "Ограничение управления"
+    if controller is not None:
+        eta = result["model_values"]["eta"]
+        low = max(0.0, eta - controller["control_limit"])
+        high = min(1.0, eta + controller["control_limit"])
+        if np.any(np.isclose(control, low, rtol=0.0, atol=1e-8)
+                  | np.isclose(control, high, rtol=0.0, atol=1e-8)):
+            return "Ограничение управления"
     return "Устойчиво"

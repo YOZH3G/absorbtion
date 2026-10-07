@@ -26,17 +26,19 @@ def write_csv(selected_path, result):
     columns = [
         ("Время, с", result["time"]),
         ("Профиль воздействия", result["profile"]),
-        ("Цель: совместное воздействие", result["targets"]["Совместное воздействие"]),
+        ("Цель: совместное воздействие, доля", result["targets"]["Совместное воздействие"]),
     ]
     columns.extend(
-        (f"Отклик: {label}", values)
+        (f"Отклик: {label}, доля", values)
         for label, values in result["responses"].items()
     )
+    columns.extend((f"Концентрация {key}, доля", values)
+                   for key, values in result["phase_responses"].items())
     if result["controlled_response"] is not None:
         columns.extend((
-            ("Регулируемый выход", result["controlled_response"]),
-            ("Ошибка e(t)", result["error"]),
-            ("Управляющее воздействие u(t)", result["control"]),
+            ("Регулируемый выход, доля", result["controlled_response"]),
+            ("Ошибка e(t), доля", result["error"]),
+            ("Степень извлечения η(t), доля", result["control"]),
         ))
     path = Path(selected_path)
     with path.open("w", encoding="utf-8-sig", newline="") as file:
@@ -59,6 +61,9 @@ def build_protocol(result, title):
         ("Запаздывание L", f"{result['dynamics']['delay']:g} с"),
         ("Режим", result["result_mode"]),
     ]
+    for key in ("gg", "ga", "xg", "xa", "eta"):
+        value = result["model_values"][key]
+        parameters.append((key, f"{value:g} кг/ч" if key in ("gg", "ga") else f"{value * 100:.8g}%"))
     if controller is not None:
         parameters.extend((
             ("K", f"{controller['controller_gain']:g}"),
@@ -74,8 +79,8 @@ def build_protocol(result, title):
                 if "D" in controller["controller_type"]
                 else "не используется",
             ),
-            ("Ограничение |u|", f"{controller['control_limit']:g}"),
-            ("Задание", f"{controller['setpoint']:g}"),
+            ("Предел Δη", f"{controller['control_limit'] * 100:g} п.п."),
+            ("Задание", f"{controller['setpoint'] * 100:g}%"),
         ))
 
     metrics = result["metrics"]
@@ -87,12 +92,12 @@ def build_protocol(result, title):
         else max(0.0, settling_time - result["response_start"])
     )
     results = [
-        ("Базовое значение", _format_number(result["baseline"])),
+        ("Базовое значение", f"{result["baseline"] * 100:.8g}%"),
         ("Суммарная доля", f"{_format_number(result['combined_fraction'])} ({result['combined_fraction'] * 100:+.1f}%)"),
-        ("Расчётное значение", _format_number(result["calculated"])),
-        ("В конце моделирования", _format_number(result["final_response"][-1])),
-        ("Установившееся значение", _format_number(metrics["steady_state"])),
-        ("Максимальное отклонение", _format_number(metrics["maximum_deviation"])),
+        ("Расчётное значение", f"{result["calculated"] * 100:.8g}%"),
+        ("В конце моделирования", f"{result["final_response"][-1] * 100:.8g}%"),
+        ("Установившееся значение", f"{metrics["steady_state"] * 100:.8g}%"),
+        ("Максимальное отклонение", f"{metrics["maximum_deviation"] * 100:.8g} п.п."),
         (
             "Относительное отклонение",
             f"{relative_deviation:.2f}%" if relative_deviation is not None else "не определено",
@@ -103,8 +108,13 @@ def build_protocol(result, title):
             else "Длительность установления (±5%)",
             "не достигнуто" if settling_duration is None else f"{settling_duration:.1f} с",
         ),
-        ("Статическая ошибка", _format_signed_number(metrics["static_error"])),
+        ("Статическая ошибка", f"{metrics['static_error'] * 100:+.8g} п.п."),
     ]
+    balance = result["stationary_balance"]
+    for key in ("j", "gog", "gna", "mass_residual", "component_residual"):
+        results.append((key + " (полная амплитуда, исходная η)", f"{float(balance[key]):.8g} кг/ч"))
+    if controller is not None:
+        results.append(("Достижимость задания", "Да" if result["setpoint_reachable"] else "Нет: достигнут предел η"))
     return format_protocol(title, parameters, results)
 
 
@@ -170,7 +180,7 @@ def write_pdf_report(
         ("Закреплённые опыты", _comparison_text(comparison_runs)),
         ("Вывод студента", conclusion or "не указан"),
     )
-    return _write_pdf(selected_path, (_text_page("Отчёт по лабораторной работе", sections), *figures))
+    return _write_pdf(selected_path, (*_text_pages("Отчёт по лабораторной работе", sections), *figures))
 
 
 def write_comparison_html_report(selected_path, runs):
@@ -198,7 +208,7 @@ def write_comparison_pdf_report(selected_path, runs):
     figures = build_comparison_figures(runs)
     return _write_pdf(
         selected_path,
-        (_text_page("Отчёт по сравнению закреплённых опытов", sections), *figures),
+        (*_text_pages("Отчёт по сравнению закреплённых опытов", sections), *figures),
     )
 
 
@@ -210,12 +220,12 @@ def build_comparison_figures(runs):
     response_axis = response_figure.add_subplot(111)
     for index, run in enumerate(runs):
         response_axis.plot(
-            run["time"], run["response"], color=colors[index % len(colors)],
+            run["time"], np.asarray(run["response"]) * 100, color=colors[index % len(colors)],
             linewidth=2.2, label=run["name"],
         )
     response_axis.set_title("Сравнение переходных процессов")
     response_axis.set_xlabel("Время, с")
-    response_axis.set_ylabel("Концентрация")
+    response_axis.set_ylabel("Концентрация, %")
     response_axis.grid(color="#D7DCE2", linewidth=0.8)
     response_axis.legend(loc="lower center", bbox_to_anchor=(0.5, 1.02), ncol=len(runs), frameon=False)
 
@@ -258,23 +268,33 @@ def _write_pdf(selected_path, figures):
     return path
 
 
-def _text_page(title, sections):
-    figure = Figure(figsize=(8.27, 11.69))
-    axis = figure.add_axes((0.08, 0.06, 0.84, 0.88))
-    axis.set_axis_off()
-    y = 0.98
-    axis.text(0, y, title, fontsize=18, fontweight="bold", va="top")
-    y -= 0.06
+def _text_pages(title, sections):
+    pages = []
+
+    def new_page():
+        figure = Figure(figsize=(8.27, 11.69))
+        axis = figure.add_axes((0.08, 0.06, 0.84, 0.88))
+        axis.set_axis_off()
+        axis.text(0, 0.98, title, fontsize=18, fontweight="bold", va="top")
+        pages.append(figure)
+        return axis, 0.92
+
+    axis, y = new_page()
     for heading, content in sections:
+        if y < 0.10:
+            axis, y = new_page()
         axis.text(0, y, heading, fontsize=11, fontweight="bold", va="top")
         y -= 0.025
         for line in _wrapped_lines(content):
+            if y < 0.05:
+                axis, y = new_page()
+                axis.text(0, y, heading + " (продолжение)", fontsize=11,
+                          fontweight="bold", va="top")
+                y -= 0.025
             axis.text(0, y, line, fontsize=9, va="top", family="DejaVu Sans")
             y -= 0.018
-            if y < 0.05:
-                return figure
         y -= 0.018
-    return figure
+    return tuple(pages)
 
 
 def _wrapped_lines(value):
@@ -293,7 +313,8 @@ def _prediction_text(prediction):
         "fastest": "Самая быстрая кривая",
         "correction": "Действие регулятора",
     }
-    return "\n".join(f"{labels[key]}: {value}" for key, value in prediction.items() if key in labels)
+    return "\n".join(f"{labels[key]}: {_prediction_value(key, value)}"
+                     for key, value in prediction.items() if key in labels)
 
 
 def _comparison_text(runs):
@@ -301,10 +322,14 @@ def _comparison_text(runs):
         return "Закреплённые опыты отсутствуют."
     return "\n".join(
         f"{run['name']}: регулятор {run['controller_type']}; "
-        f"максимальное отклонение {_format_number(run['maximum_deviation'])}; "
+        f"максимальное отклонение {_format_number(run['maximum_deviation'] * 100) + ' п.п.'}; "
         f"установление {_format_optional_number(run['settling_duration'])} с."
         for run in runs
     )
+
+
+def _prediction_value(key, value):
+    return f"{float(value) * 100:.8g}%" if key == "steady" else str(value)
 
 
 def _prediction_markup(prediction):
@@ -317,7 +342,7 @@ def _prediction_markup(prediction):
         "correction": "Действие регулятора",
     }
     items = "".join(
-        f"<li><b>{labels[key]}:</b> {html.escape(str(value))}</li>"
+        f"<li><b>{labels[key]}:</b> {html.escape(_prediction_value(key, value))}</li>"
         for key, value in prediction.items() if key in labels
     )
     return f"<ul>{items or '<li>Не указан</li>'}</ul>"
@@ -347,7 +372,7 @@ def _comparison_markup(runs):
         "<tr>"
         f"<td>{html.escape(str(run['name']))}</td>"
         f"<td>{html.escape(str(run['controller_type']))}</td>"
-        f"<td>{_format_number(run['maximum_deviation'])}</td>"
+        f"<td>{_format_number(run['maximum_deviation'] * 100) + ' п.п.'}</td>"
         f"<td>{_format_optional_number(run['settling_duration'])}</td>"
         "</tr>"
         for run in runs

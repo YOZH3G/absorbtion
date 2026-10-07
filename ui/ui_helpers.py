@@ -211,10 +211,10 @@ DISTURBANCE_HELP = {
 
 
 FORMULAS = {
-    "P": r"$u(t)=K\,e(t)$",
-    "PI": r"$u(t)=K\left(e(t)+\frac{1}{T_i}\int_0^t e(\tau)\,d\tau\right)$",
-    "PD": r"$u(t)=K\left(e(t)-T_d\frac{dy(t)}{dt}\right)$",
-    "PID": r"$u(t)=K\left(e(t)+\frac{1}{T_i}\int_0^t e(\tau)\,d\tau-T_d\frac{dy(t)}{dt}\right)$",
+    "P": r"$v(t)=K\,e(t)$",
+    "PI": r"$v(t)=K\left(e(t)+\frac{1}{T_i}\int_0^t e(\tau)\,d\tau\right)$",
+    "PD": r"$v(t)=K\left(e(t)-T_d\frac{dy(t)}{dt}\right)$",
+    "PID": r"$v(t)=K\left(e(t)+\frac{1}{T_i}\int_0^t e(\tau)\,d\tau-T_d\frac{dy(t)}{dt}\right)$",
 }
 
 
@@ -408,7 +408,7 @@ class FormulaPanel(ttk.Frame):
         self.axis.text(
             0.02,
             0.29,
-            r"$\lambda=\max(0.5T,L),\qquad K=\frac{T}{\lambda+L}$",
+            r"$\lambda=\max(0.5T,L),\qquad K=\frac{T}{|k_\eta|(\lambda+L)}$",
             fontsize=10.5,
             color="#1F2937",
             va="center",

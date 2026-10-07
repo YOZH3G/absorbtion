@@ -1,3 +1,4 @@
+from app.calculations import DEFAULT_MODEL_VALUES, absorption_balance
 import tempfile
 import unittest
 from pathlib import Path
@@ -15,20 +16,20 @@ from app.exporting import (
     write_html_report,
     write_pdf_report,
     write_protocol,
+    _text_pages,
 )
 from app.simulation import LEAN_GAS, run_simulation
 
 
 class ExportTests(unittest.TestCase):
+    def test_long_text_report_retains_the_last_line_on_additional_pages(self):
+        pages = _text_pages("Report", [("Protocol", "\n".join(f"line {index}" for index in range(120)))])
+        self.assertGreater(len(pages), 1)
+        texts = [text.get_text() for page in pages for axis in page.axes for text in axis.texts]
+        self.assertIn("line 119", texts)
+
     def setUp(self):
-        model_values = {
-            "gna": 7800.0,
-            "xa": 0.5,
-            "xg": 0.5,
-            "gg": 1000.0,
-            "xog_initial": 0.8,
-            "xna_initial": 30.0,
-        }
+        model_values = DEFAULT_MODEL_VALUES.copy()
         dynamics = {
             "kind": STEP,
             "start_time": 10.0,
@@ -65,7 +66,7 @@ class ExportTests(unittest.TestCase):
 
         self.assertIn("Учебный сценарий", saved)
         self.assertIn("- Запаздывание L: 2 с", saved)
-        self.assertIn("- Расчётное значение: 0.88", saved)
+        self.assertIn("- Расчётное значение: 16.666667%", saved)
 
     def test_two_graphs_are_saved_with_distinct_suffixes(self):
         signal_figure = Figure()

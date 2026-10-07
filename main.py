@@ -7,15 +7,16 @@ from matplotlib.colors import ListedColormap
 from matplotlib.figure import Figure
 
 APP_NAME = "Анализ процесса абсорбции"
-APP_VERSION = "1.4.2"
+APP_VERSION = "1.5.0"
 
 from app.calculations import (
     CONTROLLER_TYPES,
+    DEFAULT_MODEL_VALUES,
+    absorption_balance,
     IMPULSE,
     RAMP,
     RECTANGLE,
     STEP,
-    tune_controller_parameters,
 )
 from app.comparison import MAX_COMPARISON_RUNS, build_comparison_run, write_comparison_csv
 from app.exporting import (
@@ -45,8 +46,8 @@ from app.laboratory import (
 from app.scenario_store import ScenarioStore
 from app.session_store import read_session, write_session
 from app.settings_store import SettingsStore
-from app.simulation import LEAN_GAS, RICH_ABSORBENT, run_simulation
-from app.validation import parse_fraction, parse_nonnegative_number, parse_positive_number
+from app.simulation import LEAN_GAS, RICH_ABSORBENT, run_simulation, tune_balanced_controller
+from app.validation import parse_fraction, parse_nonnegative_number, parse_positive_number, parse_percentage
 from ui.model_dialog import ModelParametersDialog
 from ui.scenario_editor import ScenarioEditorDialog
 from ui.ui_helpers import (
@@ -85,14 +86,7 @@ CURVE_STYLES = {
     "Совместное воздействие": (ACCENT, "-"),
 }
 
-DEFAULT_MODEL_VALUES = {
-    "gna": 7800.0,
-    "xa": 0.5,
-    "xg": 0.5,
-    "gg": 1000.0,
-    "xog_initial": 0.8,
-    "xna_initial": 30.0,
-}
+
 
 
 class AbsorptionApp(ttk.Frame):
@@ -134,7 +128,7 @@ class AbsorptionApp(ttk.Frame):
         self.integral_time = tk.StringVar(value="20")
         self.derivative_time = tk.StringVar(value="1")
         self.control_limit = tk.StringVar(value="100")
-        self.setpoint = tk.StringVar(value=self._format_number(DEFAULT_MODEL_VALUES["xog_initial"]))
+        self.setpoint = tk.StringVar(value=self._format_number((1 / 6 * 100)))
         self.component_error = tk.StringVar()
         self.flow_error = tk.StringVar()
         self.dynamics_error = tk.StringVar()
@@ -237,6 +231,11 @@ class AbsorptionApp(ttk.Frame):
         self._update_lesson_summary()
         self._update_learning_route()
         self._select_chain(LEAN_GAS)
+        for variable in (self.component_enabled, self.flow_enabled, self.component_value, self.flow_value,
+                         self.disturbance_type, self.start_time, self.simulation_duration, self.effect_duration,
+                         self.time_constant, self.delay, self.controller_enabled, self.controller_type,
+                         self.proportional_gain, self.integral_time, self.derivative_time, self.control_limit, self.setpoint):
+            variable.trace_add("write", self._mark_result_stale)
         if self.scenario_store.warning:
             self._set_status(self.scenario_store.warning, error=True)
 
@@ -565,7 +564,7 @@ class AbsorptionApp(ttk.Frame):
 
         def apply_values(values):
             self.model_values = values
-            self.setpoint.set(self._format_number(self._current_baseline()))
+            self.setpoint.set(self._format_number(self._current_baseline() * 100))
             self._reset()
             self._set_status("Параметры модели обновлены")
 
@@ -757,16 +756,16 @@ class AbsorptionApp(ttk.Frame):
             ("Коэффициент регулятора K", self.proportional_gain, "proportional_gain_entry"),
             ("Время интегрирования Ti, с", self.integral_time, "integral_time_entry"),
             ("Время дифференцирования Td, с", self.derivative_time, "derivative_time_entry"),
-            ("Ограничение |u|", self.control_limit, "control_limit_entry"),
-            ("Заданное значение", self.setpoint, "setpoint_entry"),
+            ("Предел Δη, п.п.", self.control_limit, "control_limit_entry"),
+            ("Задание концентрации, %", self.setpoint, "setpoint_entry"),
         )
         self.controller_entries = []
         controller_help = {
             "Коэффициент регулятора K": "K определяет силу реакции регулятора на текущую ошибку.",
             "Время интегрирования Ti, с": "Ti задаёт скорость накопления интегральной составляющей: меньше Ti — сильнее интегральное действие.",
             "Время дифференцирования Td, с": "Td определяет влияние скорости изменения выхода; большое Td повышает чувствительность к шуму.",
-            "Ограничение |u|": "Максимальный модуль управляющего воздействия, доступный исполнительному механизму.",
-            "Заданное значение": "Значение выхода, к которому регулятор должен вернуть объект.",
+            "Предел Δη, п.п.": "Максимальное изменение η от исходного значения в процентных пунктах; η остаётся от 0 до 100%.",
+            "Задание концентрации, %": "Значение выхода, к которому регулятор должен вернуть объект.",
         }
         for row, (label, variable, attribute) in enumerate(fields, start=2):
             field_label = ttk.Label(parameters, text=label, style="Body.TLabel")
@@ -999,8 +998,8 @@ class AbsorptionApp(ttk.Frame):
             map_data = controller_setting_map(
                 self.chain, self.model_values, component_fraction, flow_fraction, dynamics,
                 controller_type, gains, integral_times,
-                parse_positive_number(self.control_limit.get()),
-                parse_positive_number(self.setpoint.get()),
+                parse_percentage(self.control_limit.get()),
+                parse_percentage(self.setpoint.get()),
                 derivative_time=derivative_time,
             )
         except ValueError as error:
@@ -1396,7 +1395,7 @@ class AbsorptionApp(ttk.Frame):
             setattr(self, attribute, widget)
             self.prediction_widgets.append(widget)
             row += 1
-        ttk.Label(assignment, text="Ожидаемое установившееся значение", style="Body.TLabel", wraplength=170).grid(
+        ttk.Label(assignment, text="Ожидаемое установившееся значение, %", style="Body.TLabel", wraplength=170).grid(
             row=row, column=0, sticky="w", pady=4
         )
         self.steady_prediction = ttk.Entry(
@@ -1554,6 +1553,7 @@ class AbsorptionApp(ttk.Frame):
             self._apply_scenario_data(scenario)
 
     def _apply_scenario_data(self, scenario, variant_number=None):
+        self.model_values = scenario["model_values"].copy()
         self.current_lesson = scenario["lesson"]
         self.assignment_attempts = 0
         self.assignment_evaluation = None
@@ -1587,10 +1587,10 @@ class AbsorptionApp(ttk.Frame):
             self.proportional_gain.set(self._format_number(controller["gain"]))
             self.integral_time.set(self._format_number(controller["integral_time"]))
             self.derivative_time.set(self._format_number(controller["derivative_time"]))
-            self.control_limit.set(self._format_number(controller["control_limit"]))
+            self.control_limit.set(self._format_number(controller["control_limit"] * 100))
             setpoint = controller.get("setpoint")
             self.setpoint.set(
-                self._format_number(self._current_baseline() if setpoint is None else setpoint)
+                self._format_number(100 * (self._current_baseline() if setpoint is None else setpoint))
             )
 
         self.assignment_tolerance_percent = scenario.get("steady_tolerance_percent", 5.0)
@@ -1770,7 +1770,7 @@ class AbsorptionApp(ttk.Frame):
             self._show_page("scenarios")
             raise ValueError("Прогноз заполнен не полностью.")
         try:
-            steady = parse_positive_number(self.predicted_steady.get())
+            steady = parse_percentage(self.predicted_steady.get())
         except ValueError as error:
             self.steady_prediction.configure(style="Error.TEntry")
             self.assignment_feedback.set(f"Установившееся значение: {error}")
@@ -1821,7 +1821,7 @@ class AbsorptionApp(ttk.Frame):
         run = build_comparison_run(
             self.last_calculation,
             name,
-            self._capture_input_state(),
+            self.last_calculation["input_state"],
         )
         run["id"] = f"run-{self.comparison_counter}"
         self.comparison_runs.append(run)
@@ -1848,9 +1848,9 @@ class AbsorptionApp(ttk.Frame):
                     self._format_number(run["time_constant"]),
                     self._format_number(run["delay"]),
                     run["controller_type"],
-                    self._format_number(run["maximum_deviation"]),
+                    self._format_number(run["maximum_deviation"] * 100),
                     settling,
-                    self._format_signed_number(run["static_error"]),
+                    self._format_signed_number(run["static_error"] * 100),
                 ),
             )
         for run_id in selected_ids:
@@ -2081,10 +2081,35 @@ class AbsorptionApp(ttk.Frame):
     def _export_comparison_graphs(self):
         self._export_graphs_png()
 
+    def _mark_result_stale(self, *_):
+        if self.last_calculation is None or "input_state" not in self.last_calculation:
+            return
+        def normalized(state):
+            result = dict(state)
+            for key, value in result.items():
+                if isinstance(value, str):
+                    try:
+                        result[key] = float(value.replace(",", "."))
+                    except ValueError:
+                        pass
+            if not result["component_enabled"]:
+                result["component_value"] = None
+            if not result["flow_enabled"]:
+                result["flow_value"] = None
+            if result["disturbance_type"] == "Ступенчатое":
+                result["effect_duration"] = None
+            return result
+        stale = normalized(self._capture_input_state()) != normalized(self.last_calculation["input_state"])
+        self.export_summary.set("Параметры изменены — пересчитайте опыт. Экспорт относится к последнему расчёту."
+                                if stale else "Расчёт готов к экспорту.")
+        self.response_subtitle.set("Параметры изменены — график последнего расчёта" if stale
+                                   else "Результат последнего расчёта")
+
     def _capture_input_state(self):
         return {
             "chain": self.chain,
             "model_values": self.model_values.copy(),
+            "model_version": 2,
             "component_enabled": self.component_enabled.get(),
             "flow_enabled": self.flow_enabled.get(),
             "component_value": self.component_value.get(),
@@ -2107,12 +2132,15 @@ class AbsorptionApp(ttk.Frame):
     def _restore_input_state(self, state):
         if state["chain"] not in (LEAN_GAS, RICH_ABSORBENT):
             raise ValueError("неизвестная цепь управления")
+        if state.get("model_version") != 2:
+            raise ValueError("Несовместимая версия модели; старые сеансы не поддерживаются.")
         model_values = state.get("model_values", {})
         if not isinstance(model_values, dict):
             raise ValueError("некорректные параметры математической модели")
         restored_model = DEFAULT_MODEL_VALUES.copy()
         for key in restored_model:
             restored_model[key] = float(model_values.get(key, restored_model[key]))
+        absorption_balance(**restored_model)
         self.model_values = restored_model
         self._select_chain(state["chain"])
         for key, variable in (
@@ -2149,11 +2177,11 @@ class AbsorptionApp(ttk.Frame):
         self._remove_controller_axis()
         self.primary_chart_title.set("Сравнение переходных процессов")
         self.primary_chart_subtitle.set("Закреплённые расчёты на одном графике")
-        self._style_axis(self.disturbance_axis, "Время, с", "Концентрация")
+        self._style_axis(self.disturbance_axis, "Время, с", "Концентрация, %")
         colors = ("#2563EB", "#F59E0B", "#16A34A", "#7C3AED", "#DB2777", "#0891B2")
         for index, run in enumerate(runs):
             self.disturbance_axis.plot(
-                *plot_samples(run["time"], run["response"]),
+                *plot_samples(run["time"], run["response"] * 100),
                 color=colors[index % len(colors)],
                 linewidth=2.2,
                 label=run["name"],
@@ -2340,15 +2368,11 @@ class AbsorptionApp(ttk.Frame):
             self.flow_symbol.set("Gа")
             self.response_subtitle.set("Концентрация насыщенного абсорбента")
 
-        self.setpoint.set(self._format_number(self._current_baseline()))
+        self.setpoint.set(self._format_number(self._current_baseline() * 100))
         self._reset()
 
     def _current_baseline(self):
-        return (
-            self.model_values["xog_initial"]
-            if self.chain == LEAN_GAS
-            else self.model_values["xna_initial"]
-        )
+        return float(absorption_balance(**self.model_values)["xog" if self.chain == LEAN_GAS else "xna"])
 
     def _update_controller_type(self, _event=None):
         controller_type = self.controller_type.get()
@@ -2359,7 +2383,7 @@ class AbsorptionApp(ttk.Frame):
             details.append("Интегратор защищён от насыщения.")
         if "D" in controller_type:
             details.append("Производная берётся по выходу без скачка от задания.")
-        details.append("|u| задаёт предел воздействия.")
+        details.append("η = clip(η₀ + s·v): s = −1 для газа, +1 для жидкости. Предел Δη — в п.п.")
         self.controller_formula.set(
             f"{' '.join(details)}\n\n"
             "Выше показаны правила автоподбора. Для PID/PD при наличии "
@@ -2429,11 +2453,16 @@ class AbsorptionApp(ttk.Frame):
                 return
 
         controller_type = self.controller_type.get()
-        tuning = tune_controller_parameters(
-            controller_type,
-            parsed["Постоянная времени T"],
-            parsed["Запаздывание L"],
-        )
+        try:
+            tuning = tune_balanced_controller(
+                self.chain, self.model_values, controller_type,
+                parsed["Постоянная времени T"],
+                parsed["Запаздывание L"],
+            )
+        except ValueError as error:
+            self.controller_error.set(str(error))
+            self._set_status(str(error), error=True)
+            return
         self._set_controller_mode(True)
         self.proportional_gain.set(self._format_number(tuning["proportional_gain"]))
         if tuning["integral_time"] is not None:
@@ -2612,8 +2641,8 @@ class AbsorptionApp(ttk.Frame):
         controller_type = self.controller_type.get()
         fields = [
             ("Коэффициент K", self.proportional_gain, self.proportional_gain_entry, parse_nonnegative_number),
-            ("Ограничение |u|", self.control_limit, self.control_limit_entry, parse_positive_number),
-            ("Заданное значение", self.setpoint, self.setpoint_entry, parse_positive_number),
+            ("Предел Δη, п.п.", self.control_limit, self.control_limit_entry, parse_percentage),
+            ("Задание концентрации, %", self.setpoint, self.setpoint_entry, parse_percentage),
         ]
         if "I" in controller_type:
             fields.append(("Время интегрирования Ti", self.integral_time, self.integral_time_entry, parse_positive_number))
@@ -2634,8 +2663,8 @@ class AbsorptionApp(ttk.Frame):
             "controller_gain": parsed["Коэффициент K"],
             "integral_time": parsed.get("Время интегрирования Ti", 1.0),
             "derivative_time": parsed.get("Время дифференцирования Td", 0.0),
-            "control_limit": parsed["Ограничение |u|"],
-            "setpoint": parsed["Заданное значение"],
+            "control_limit": parsed["Предел Δη, п.п."],
+            "setpoint": parsed["Задание концентрации, %"],
         }
 
     def _calculate(self):
@@ -2664,13 +2693,14 @@ class AbsorptionApp(ttk.Frame):
             self._set_status(str(error), error=True)
             return
         result["disturbance_type"] = self.disturbance_type.get()
+        result["input_state"] = self._capture_input_state()
 
-        self.baseline_result.set(self._format_number(result["baseline"]))
+        self.baseline_result.set(self._format_number(result["baseline"] * 100) + "%")
         self.disturbance_result.set(
             f"{self._format_number(result['combined_fraction'])} "
             f"({result['combined_fraction'] * 100:+.1f}%)"
         )
-        self.calculated_result.set(self._format_number(result["calculated"]))
+        self.calculated_result.set(self._format_number(result["calculated"] * 100) + "%")
         self._update_calculation_steps(
             component_fraction,
             flow_fraction,
@@ -2681,7 +2711,7 @@ class AbsorptionApp(ttk.Frame):
         self._draw_calculation_result(result)
 
         self.result_mode.set(result["result_mode"])
-        self.final_result.set(self._format_number(result["final_response"][-1]))
+        self.final_result.set(self._format_number(result["final_response"][-1] * 100) + "%")
         self._update_transition_metrics(
             result["metrics"],
             dynamics,
@@ -2692,7 +2722,8 @@ class AbsorptionApp(ttk.Frame):
         self.add_comparison_button.configure(state="normal")
         for button in self.export_buttons:
             button.configure(state="normal")
-        self.export_summary.set("Расчёт готов к экспорту.")
+        self.export_summary.set("Расчёт готов к экспорту." if result["setpoint_reachable"] is not False
+                                else "Задание недостижимо при допустимых η; показано насыщение регулятора.")
         self._evaluate_assignment(prediction, result["prediction_outcome"])
         settling_time = result["metrics"]["settling_time"]
         settling_summary = (
@@ -2717,19 +2748,17 @@ class AbsorptionApp(ttk.Frame):
         baseline,
         calculated,
     ):
-        component_symbol = "Xг" if self.chain == LEAN_GAS else "Xа"
-        flow_symbol = "Gг" if self.chain == LEAN_GAS else "Gа"
+        from app.simulation import disturbed_inputs
+        values = disturbed_inputs(self.chain, self.model_values, component_fraction, flow_fraction)
+        balance = absorption_balance(**values)
         self.calculation_steps.set(
-            f"Возмущение состава {component_symbol}: {component_fraction * 100:+.1f}%\n"
-            f"Возмущение расхода {flow_symbol}: {flow_fraction * 100:+.1f}%\n\n"
-            "Совместная доля:\n"
-            f"({self._factor_expression(component_fraction)}) · "
-            f"({self._factor_expression(flow_fraction)}) − 1 = "
-            f"{self._format_signed_number(combined_fraction)}\n\n"
-            "Новое значение:\n"
-            f"{self._format_number(baseline)} · "
-            f"{self._format_number(1 + combined_fraction)} = "
-            f"{self._format_number(calculated)}"
+            f"J = η · Gг · Xг = {float(balance['j']):.6g} кг/ч\n"
+            f"Gог = Gг − J = {float(balance['gog']):.6g} кг/ч\n"
+            f"Gна = Gа + J = {float(balance['gna']):.6g} кг/ч\n"
+            f"Xог = (Gг · Xг − J) / Gог = {float(balance['xog']) * 100:.6g}%\n"
+            f"Xна = (Gа · Xа + J) / Gна = {float(balance['xna']) * 100:.6g}%\n"
+            f"Баланс стационарного режима: масса {float(balance['mass_residual']):.3g} кг/ч; "
+            f"компонент {float(balance['component_residual']):.3g} кг/ч."
         )
 
     def _update_transition_metrics(self, metrics, dynamics, response_start):
@@ -2742,16 +2771,16 @@ class AbsorptionApp(ttk.Frame):
             settling_moment_text = f"t = {settling_time:.1f} с"
 
         relative_deviation = metrics["relative_deviation"]
-        self.transition_values["initial"].set(self._format_number(metrics["initial_value"]))
-        self.transition_values["steady"].set(self._format_number(metrics["steady_state"]))
-        self.transition_values["maximum_deviation"].set(self._format_number(metrics["maximum_deviation"]))
+        self.transition_values["initial"].set(self._format_number(metrics["initial_value"] * 100) + "%")
+        self.transition_values["steady"].set(self._format_number(metrics["steady_state"] * 100) + "%")
+        self.transition_values["maximum_deviation"].set(self._format_number(metrics["maximum_deviation"] * 100) + " п.п.")
         self.transition_values["relative_deviation"].set(
             f"{relative_deviation:.2f}%" if relative_deviation is not None else "не определено"
         )
         self.transition_values["time_constant"].set(f"{self._format_number(dynamics['time_constant'])} с")
         self.transition_values["settling_time"].set(settling_text)
         self.transition_values["settling_moment"].set(settling_moment_text)
-        self.transition_values["static_error"].set(self._format_signed_number(metrics["static_error"]))
+        self.transition_values["static_error"].set(self._format_signed_number(metrics["static_error"] * 100) + " п.п.")
 
     def _reset(self):
         self.component_enabled.set(False)
@@ -2802,10 +2831,10 @@ class AbsorptionApp(ttk.Frame):
         time = np.linspace(0.0, simulation_duration, 501)
         self._draw_disturbance(time, np.zeros_like(time), 0.0, 0.0)
         self.response_chart_title.set("Кривая разгона")
-        self._style_axis(self.response_axis, "Время", "Концентрация")
+        self._style_axis(self.response_axis, "Время", "Концентрация, %")
         self.response_axis.plot(
             [0, simulation_duration],
-            [baseline, baseline],
+            [baseline * 100, baseline * 100],
             color=CURVE_STYLES["Исходный режим"][0],
             linestyle=CURVE_STYLES["Исходный режим"][1],
             linewidth=2,
@@ -2834,14 +2863,14 @@ class AbsorptionApp(ttk.Frame):
         colors = ("#2563EB", "#F59E0B", "#16A34A", "#7C3AED", "#DB2777", "#0891B2")
         self.primary_chart_title.set("Анализ чувствительности")
         self.primary_chart_subtitle.set(f"Семейство кривых по параметру: {parameter}")
-        self._style_axis(self.disturbance_axis, "Время, с", "Концентрация")
+        self._style_axis(self.disturbance_axis, "Время, с", "Концентрация, %")
         for index, run in enumerate(runs):
             result = run["result"]
             value = run["value"]
             suffix = "%" if parameter.startswith("Возмущение") else " с"
             shown_value = value * 100 if parameter.startswith("Возмущение") else value
             self.disturbance_axis.plot(
-                *plot_samples(result["time"], result["final_response"]), color=colors[index], linewidth=2.2,
+                *plot_samples(result["time"], result["final_response"] * 100), color=colors[index], linewidth=2.2,
                 label=f"{shown_value:g}{suffix}",
             )
         self.disturbance_axis.margins(x=0.02, y=0.12)
@@ -2895,14 +2924,14 @@ class AbsorptionApp(ttk.Frame):
     def _draw_map_selection_response(self):
         self.response_chart_title.set("Переходный процесс выбранной точки")
         self.response_subtitle.set("Выберите ячейку карты")
-        self._style_axis(self.response_axis, "Время, с", "Концентрация")
+        self._style_axis(self.response_axis, "Время, с", "Концентрация, %")
         if self.map_selection is None:
             self.response_axis.text(0.5, 0.5, "Ячейка не выбрана", transform=self.response_axis.transAxes, ha="center", va="center", color=MUTED)
         else:
             row, column = self.map_selection
             result = self.map_data["results"][row][column]
-            self.response_axis.plot(*plot_samples(result["time"], result["final_response"]), color=ACCENT, linewidth=2.4, label="Выбранная настройка")
-            self.response_axis.axhline(result["controller"]["setpoint"], color=MUTED, linestyle="--", label="Задание")
+            self.response_axis.plot(*plot_samples(result["time"], result["final_response"] * 100), color=ACCENT, linewidth=2.4, label="Выбранная настройка")
+            self.response_axis.axhline(result["controller"]["setpoint"] * 100, color=MUTED, linestyle="--", label="Задание")
             self._place_legend_above(self.response_axis)
             self.response_subtitle.set(self.map_selection_summary.get())
         self.response_canvas.draw_idle()
@@ -3027,11 +3056,11 @@ class AbsorptionApp(ttk.Frame):
 
     def _draw_response(self, time, responses, dynamics=None, metrics=None):
         self.response_chart_title.set("Кривая разгона")
-        self._style_axis(self.response_axis, "Время, с", "Концентрация")
+        self._style_axis(self.response_axis, "Время, с", "Концентрация, %")
         for label, response in responses.items():
             color, linestyle = CURVE_STYLES[label]
             self.response_axis.plot(
-                *plot_samples(time, response),
+                *plot_samples(time, response * 100),
                 color=color,
                 linestyle=linestyle,
                 linewidth=2.4 if label == "Совместное воздействие" else 1.8,
@@ -3047,9 +3076,9 @@ class AbsorptionApp(ttk.Frame):
         self._remove_controller_axis()
         self.primary_chart_title.set("Ошибка и управляющее воздействие")
         self.primary_chart_subtitle.set("Сигналы замкнутой системы")
-        self._style_axis(self.disturbance_axis, "Время, с", "Ошибка e(t)")
+        self._style_axis(self.disturbance_axis, "Время, с", "Ошибка e(t), п.п.")
         error_line = self.disturbance_axis.plot(
-            *plot_samples(time, error),
+            *plot_samples(time, error * 100),
             color="#F59E0B",
             linewidth=2,
             label="Ошибка e(t)",
@@ -3059,12 +3088,12 @@ class AbsorptionApp(ttk.Frame):
 
         self.controller_signal_axis = self.disturbance_axis.twinx()
         control_line = self.controller_signal_axis.plot(
-            *plot_samples(time, control),
+            *plot_samples(time, control * 100),
             color="#16A34A",
             linewidth=2,
-            label="Воздействие u(t)",
+            label="Степень извлечения η(t), %",
         )[0]
-        self.controller_signal_axis.set_ylabel("Управляющее воздействие u(t)", color=TEXT)
+        self.controller_signal_axis.set_ylabel("Степень извлечения η(t), %", color=TEXT)
         self.controller_signal_axis.tick_params(colors=TEXT)
         self.controller_signal_axis.spines["top"].set_visible(False)
         self.controller_signal_axis.spines["right"].set_color(BORDER)
@@ -3087,22 +3116,22 @@ class AbsorptionApp(ttk.Frame):
         metrics=None,
     ):
         self.response_chart_title.set(f"Без регулятора / {controller_type}-регулятор")
-        self._style_axis(self.response_axis, "Время, с", "Концентрация")
+        self._style_axis(self.response_axis, "Время, с", "Концентрация, %")
         self.response_axis.axhline(
-            setpoint,
+            setpoint * 100,
             color=MUTED,
             linestyle="--",
             linewidth=1.5,
             label="Задание",
         )
         self.response_axis.plot(
-            *plot_samples(time, open_response),
+            *plot_samples(time, open_response * 100),
             color="#F59E0B",
             linewidth=2,
             label="Без регулятора",
         )
         self.response_axis.plot(
-            *plot_samples(time, controlled_response),
+            *plot_samples(time, controlled_response * 100),
             color=ACCENT,
             linewidth=2.4,
             label=f"{controller_type}-регулятор",
@@ -3183,8 +3212,8 @@ class AbsorptionApp(ttk.Frame):
         tolerance = reference * 0.05
         if tolerance > 0:
             axis.axhspan(
-                metrics["steady_state"] - tolerance,
-                metrics["steady_state"] + tolerance,
+                100 * (metrics["steady_state"] - tolerance),
+                100 * (metrics["steady_state"] + tolerance),
                 color="#16A34A",
                 alpha=0.08,
                 label="Полоса ±5%",

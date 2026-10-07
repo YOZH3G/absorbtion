@@ -10,7 +10,7 @@ def _parse_number(value, empty_message, invalid_message):
     if not text:
         raise ValueError(empty_message)
     try:
-        return float(text)
+        return float(text.replace(",", "."))
     except ValueError as error:
         raise ValueError(invalid_message) from error
 
@@ -47,3 +47,10 @@ def parse_nonnegative_number(value):
         raise ValueError("Значение не может быть отрицательным.")
 
     return number
+
+
+def parse_percentage(value):
+    number = parse_nonnegative_number(value)
+    if number > 100:
+        raise ValueError("Значение должно быть в диапазоне от 0 до 100%.")
+    return number / 100.0

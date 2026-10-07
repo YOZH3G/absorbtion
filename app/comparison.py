@@ -29,6 +29,8 @@ def build_comparison_run(result, name, input_state=None):
         "relative_deviation": metrics["relative_deviation"],
         "settling_duration": settling_duration,
         "static_error": float(metrics["static_error"]),
+        "model_version": result["model_version"],
+        "model_values": copy.deepcopy(result["model_values"]),
     }
     if input_state is not None:
         run["input_state"] = copy.deepcopy(input_state)
@@ -44,14 +46,14 @@ def write_comparison_csv(path, runs):
         writer.writerow((
             "Опыт",
             "Время, с",
-            "Выход",
+            "Выход, доля",
             "T, с",
             "L, с",
             "Регулятор",
-            "Максимальное отклонение",
+            "Максимальное отклонение, доля",
             "Относительное отклонение, %",
             "Длительность установления, с",
-            "Статическая ошибка",
+            "Статическая ошибка, доля",
         ))
         for run in runs:
             for time_value, response_value in zip(run["time"], run["response"], strict=True):

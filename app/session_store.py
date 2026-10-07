@@ -6,9 +6,10 @@ import math
 from pathlib import Path
 
 import numpy as np
+from .calculations import DEFAULT_MODEL_VALUES, absorption_balance
 
 
-FORMAT_VERSION = 1
+FORMAT_VERSION = 2
 
 
 def write_session(path, runs, counter):
@@ -18,10 +19,12 @@ def write_session(path, runs, counter):
         "comparison_counter": int(counter),
         "runs": [_serialize_run(run) for run in runs],
     }
-    destination.write_text(
+    temporary = destination.with_suffix(destination.suffix + ".tmp")
+    temporary.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
+    temporary.replace(destination)
     return destination
 
 
@@ -51,6 +54,12 @@ def _serialize_run(run):
 
 
 def _deserialize_run(run):
+    if not isinstance(run, dict) or run.get("model_version") != 2:
+        raise ValueError("Несовместимая версия модели опыта; старые сеансы не поддерживаются.")
+    values = run.get("model_values")
+    if not isinstance(values, dict) or set(values) != set(DEFAULT_MODEL_VALUES):
+        raise ValueError("Опыт должен содержать параметры согласованной модели.")
+    absorption_balance(**values)
     if not isinstance(run, dict):
         raise ValueError("Опыт должен быть объектом JSON.")
     required_text = ("id", "name", "chain", "controller_type")
@@ -62,6 +71,8 @@ def _deserialize_run(run):
     restored["response"] = _deserialize_signal(run.get("response"), "response")
     if restored["time"].shape != restored["response"].shape:
         raise ValueError("Опыт: массивы time и response должны иметь одинаковую длину.")
+    if np.any(np.diff(restored["time"]) <= 0):
+        raise ValueError("Время опыта должно строго возрастать.")
     for key in ("time_constant", "delay", "maximum_deviation", "static_error"):
         restored[key] = _finite_number(run.get(key), key)
     relative = run.get("relative_deviation")

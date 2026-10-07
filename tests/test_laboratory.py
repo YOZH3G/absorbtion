@@ -1,8 +1,8 @@
+from app.calculations import DEFAULT_MODEL_VALUES, absorption_balance
 import unittest
 
 import numpy as np
 
-from app.calculations import controller_response, disturbance_profile, transition_metrics
 from app.laboratory import (
     SCENARIOS,
     VARIANT_COUNT,
@@ -17,14 +17,7 @@ from app.scenario_store import normalize_scenario
 from app.simulation import run_simulation
 
 
-MODEL_VALUES = {
-    "gna": 7800.0,
-    "xa": 0.5,
-    "xg": 0.5,
-    "gg": 1000.0,
-    "xog_initial": 0.8,
-    "xna_initial": 30.0,
-}
+MODEL_VALUES = DEFAULT_MODEL_VALUES.copy()
 
 
 class ScenarioTests(unittest.TestCase):
@@ -84,8 +77,7 @@ class ScenarioTests(unittest.TestCase):
                         "derivative_time": controller["derivative_time"],
                         "control_limit": controller["control_limit"],
                         "setpoint": (
-                            MODEL_VALUES["xog_initial"] if variant["chain"] == "lean_gas"
-                            else MODEL_VALUES["xna_initial"]
+                            float(absorption_balance(**MODEL_VALUES)["xog" if variant["chain"] == "lean_gas" else "xna"])
                         ) if controller.get("setpoint") is None else controller["setpoint"],
                     }
                     result = run_simulation(
@@ -107,7 +99,7 @@ class ScenarioTests(unittest.TestCase):
                         controller_data,
                     )
                     self.assertTrue(np.all(np.isfinite(result["final_response"])))
-                    response_signatures.add(tuple(np.round(result["final_response"], 12)))
+                    response_signatures.add((variant["start_time"], float(result["stationary_balance"]["j"]), tuple(np.round(result["final_response"], 12))))
                 self.assertEqual(len(response_signatures), VARIANT_COUNT)
 
     def test_mistuned_controller_scenario_is_oscillatory_and_unsettled(self):
@@ -115,35 +107,21 @@ class ScenarioTests(unittest.TestCase):
             item for item in SCENARIOS
             if item["name"] == "Неверно настроенный регулятор"
         )
-        time = np.linspace(0.0, scenario["simulation_duration"], 501)
-        baseline = 0.8
-        profile = disturbance_profile(
-            time,
-            "step",
-            scenario["start_time"],
-            scenario["effect_duration"],
-        )
-        target = baseline * (1.0 + scenario["flow"] * profile)
         controller = scenario["controller"]
-        response, _error, _control = controller_response(
-            time,
-            baseline,
-            target,
-            scenario["time_constant"],
-            controller["type"],
-            controller["gain"],
-            controller["integral_time"],
-            controller["derivative_time"],
-            controller["control_limit"],
-            baseline,
-            scenario["delay"],
-        )
-        deviations = response - baseline
+        result = run_simulation(scenario["chain"], MODEL_VALUES,
+            scenario["component"] or 0.0, scenario["flow"] or 0.0,
+            dict(kind="step", start_time=scenario["start_time"],
+                 effect_duration=scenario["effect_duration"],
+                 simulation_duration=scenario["simulation_duration"],
+                 time_constant=scenario["time_constant"], delay=scenario["delay"]),
+            dict(controller_type=controller["type"], controller_gain=controller["gain"],
+                 integral_time=controller["integral_time"], derivative_time=0.,
+                 control_limit=controller["control_limit"], setpoint=1 / 6))
+        deviations = result["final_response"] - 1 / 6
         sign_changes = np.count_nonzero(deviations[1:] * deviations[:-1] < 0.0)
-        metrics = transition_metrics(time, response, np.full_like(time, baseline), baseline)
-
         self.assertGreaterEqual(sign_changes, 4)
-        self.assertIsNone(metrics["settling_time"])
+        self.assertIsNone(result["metrics"]["settling_time"])
+
 
 
 class PredictionTests(unittest.TestCase):

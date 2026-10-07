@@ -9,7 +9,7 @@ from .calculations import CONTROLLER_TYPES
 def _load_builtin_scenarios():
     path = Path(__file__).parent.parent / "data" / "builtin_scenarios.json"
     payload = json.loads(path.read_text(encoding="utf-8"))
-    if payload.get("version") != 1 or not isinstance(payload.get("scenarios"), list):
+    if payload.get("version") != 2 or not isinstance(payload.get("scenarios"), list):
         raise ValueError("Некорректный формат встроенных сценариев.")
     return tuple(payload["scenarios"])
 
