@@ -11,7 +11,7 @@ from matplotlib.colors import ListedColormap
 from matplotlib.figure import Figure
 
 APP_NAME = "Анализ процесса абсорбции"
-APP_VERSION = "1.5.0"
+APP_VERSION = "1.5.1"
 
 from app.calculations import (
     CONTROLLER_TYPES,
@@ -23,6 +23,7 @@ from app.calculations import (
     STEP,
 )
 from app.comparison import MAX_COMPARISON_RUNS, build_comparison_run, write_comparison_csv
+from app.background_tasks import BackgroundTask, CalculationCancelled
 from app.exporting import (
     build_protocol,
     save_graphs,
@@ -236,6 +237,9 @@ class AbsorptionApp(ttk.Frame):
         self.current_page = self.settings["last_page"]
         self._charts_show_comparison = False
         self.text_tooltips = []
+        self._task = None
+        self._task_poll = None
+        self._undo_clear = None
 
         self._configure_window()
         self._configure_styles()
@@ -248,6 +252,12 @@ class AbsorptionApp(ttk.Frame):
                          self.time_constant, self.delay, self.controller_enabled, self.controller_type,
                          self.proportional_gain, self.integral_time, self.derivative_time, self.control_limit, self.setpoint):
             variable.trace_add("write", self._mark_result_stale)
+        for variable in (self.assignment_enabled, self.predicted_direction, self.predicted_steady,
+                         self.predicted_fastest, self.predicted_correction, self.sensitivity_parameter,
+                         self.sensitivity_values, self.map_controller_type, self.map_gain_min,
+                         self.map_gain_max, self.map_integral_min, self.map_integral_max,
+                         self.map_derivative_time, self.map_grid_size):
+            variable.trace_add("write", self._invalidate_task)
         if self.scenario_store.warning:
             self._set_status(self.scenario_store.warning, error=True)
         self.autosave_path = self.scenario_store.path.with_name("laboratory.autosave.json")
@@ -445,7 +455,16 @@ class AbsorptionApp(ttk.Frame):
             state="disabled",
         )
         self.calculate_button.grid(row=0, column=0, sticky="ew", padx=(0, 5))
-        ttk.Button(actions, text="Сбросить", command=self._reset, style="Secondary.TButton").grid(row=0, column=1, sticky="ew", padx=(5, 0))
+        ttk.Button(actions, text="Очистить опыт", command=self._reset, style="Secondary.TButton").grid(row=0, column=1, sticky="ew", padx=(5, 0))
+        ttk.Button(actions, text="Исходные настройки", command=self._restore_experiment_defaults).grid(row=1, column=0, sticky="ew", pady=(6, 0))
+        self.undo_clear_button = ttk.Button(actions, text="Отменить очистку", command=self._undo_clear_experiment, state="disabled")
+        self.undo_clear_button.grid(row=1, column=1, sticky="ew", pady=(6, 0))
+        self.calculation_hint = tk.StringVar(value="Включите хотя бы одно возмущение")
+        ttk.Label(actions, textvariable=self.calculation_hint, style="Error.TLabel", wraplength=310).grid(row=2, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        self.cancel_button = ttk.Button(actions, text="Отменить расчёт", command=self._cancel_task, state="disabled")
+        self.cancel_button.grid(row=3, column=0, sticky="ew", pady=(6, 0))
+        self.task_progress = ttk.Progressbar(actions, maximum=100)
+        self.task_progress.grid(row=3, column=1, sticky="ew", padx=(6, 0), pady=(6, 0))
 
         workspace = ttk.Frame(self.body, style="App.TFrame", padding=(4, 16, 16, 12))
         workspace.grid(row=0, column=2, sticky="nsew")
@@ -949,22 +968,98 @@ class AbsorptionApp(ttk.Frame):
         )
         return component_fraction, flow_fraction, self._read_dynamic_parameters()
 
+    def _task_signature(self, kind):
+        steady_prediction = self.predicted_steady.get()
+        try:
+            steady_prediction = float(steady_prediction.replace(",", "."))
+        except ValueError:
+            pass
+        signature = [self._normalized_input_state(self._capture_input_state()),
+                     copy.deepcopy(self.current_lesson), self.assignment_tolerance_percent,
+                     self.assignment_absolute_tolerance, self.assignment_attempts,
+                     self.assignment_enabled.get(), self.predicted_direction.get(),
+                     steady_prediction, self.predicted_fastest.get(), self.predicted_correction.get()]
+        if kind == "sensitivity":
+            signature.extend((self.sensitivity_parameter.get(), self.sensitivity_values.get()))
+        elif kind == "map":
+            signature.extend(variable.get() for variable in (self.map_controller_type, self.map_gain_min,
+                             self.map_gain_max, self.map_integral_min, self.map_integral_max,
+                             self.map_derivative_time, self.map_grid_size))
+        return signature
+
+    def _start_task(self, name, calculate, apply, kind="calculation"):
+        self._cancel_task(announce=False)
+        self._task_kind = kind
+        self._task_source = self._task_signature(kind)
+        self._task_apply = apply
+        self._task_name = name
+        self._task = BackgroundTask(calculate)
+        self.cancel_button.configure(state="normal")
+        self.task_progress.configure(value=0)
+        self._set_status(f"{name}: 0%")
+        self._task_poll = self.root.after(50, self._poll_task)
+
+    def _poll_task(self):
+        self._task_poll = None
+        task = self._task
+        if task is None:
+            return
+        if self._task_source != self._task_signature(self._task_kind):
+            self._cancel_task()
+            return
+        outcome = task.poll()
+        if outcome is None:
+            self.task_progress.configure(value=task.progress * 100)
+            self._set_status(f"{self._task_name}: {task.progress:.0%}")
+            self._task_poll = self.root.after(100, self._poll_task)
+            return
+        self._task = None
+        self.cancel_button.configure(state="disabled")
+        value, error = outcome
+        if error is not None:
+            self.task_progress.configure(value=0)
+            self._set_status("Расчёт отменён" if isinstance(error, CalculationCancelled) else str(error),
+                             error=not isinstance(error, CalculationCancelled))
+            return
+        self.task_progress.configure(value=100)
+        self._task_apply(value)
+
+    def _cancel_task(self, announce=True):
+        if self._task is None:
+            return
+        self._task.cancel.set()
+        self._task = None
+        if self._task_poll is not None:
+            self.root.after_cancel(self._task_poll)
+            self._task_poll = None
+        self.cancel_button.configure(state="disabled")
+        self.task_progress.configure(value=0)
+        if announce:
+            self._set_status("Расчёт отменён; последний результат сохранён")
+
+    def _invalidate_task(self, *_):
+        if self._task is not None and self._task_source != self._task_signature(self._task_kind):
+            self._cancel_task()
+
     def _calculate_sensitivity(self):
         self._clear_errors()
         try:
             component_fraction, flow_fraction, dynamics = self._read_analysis_inputs()
             controller = self._read_controller_parameters()
             values = self._parse_sensitivity_values()
-            runs = sensitivity_runs(
-                self.chain, self.model_values, component_fraction, flow_fraction,
-                dynamics, controller, self.sensitivity_parameter.get(), values,
-            )
         except ValueError as error:
             self.sensitivity_summary.set(str(error))
             self._set_status("Исправьте параметры анализа чувствительности", error=True)
             return
+        chain, model = self.chain, self.model_values.copy()
+        parameter = self.sensitivity_parameter.get()
+        self._start_task("Анализ чувствительности", lambda cancel, progress: sensitivity_runs(
+            chain, model, component_fraction, flow_fraction, dynamics, controller, parameter, values,
+            cancel=cancel, progress=progress), lambda runs: self._apply_sensitivity(runs, parameter), "sensitivity")
+
+    def _apply_sensitivity(self, runs, parameter):
         self.sensitivity_data = {
-            "parameter": self.sensitivity_parameter.get(),
+            "parameter": parameter,
             "runs": runs,
         }
         self.sensitivity_summary.set(
@@ -1014,17 +1109,20 @@ class AbsorptionApp(ttk.Frame):
                 parse_nonnegative_number(self.map_derivative_time.get())
                 if controller_type == "PID" else 0.0
             )
-            map_data = controller_setting_map(
-                self.chain, self.model_values, component_fraction, flow_fraction, dynamics,
-                controller_type, gains, integral_times,
-                parse_percentage(self.control_limit.get()),
-                parse_percentage(self.setpoint.get()),
-                derivative_time=derivative_time,
-            )
+            control_limit = parse_percentage(self.control_limit.get())
+            setpoint = parse_percentage(self.setpoint.get())
         except ValueError as error:
             self.map_summary.set(str(error))
             self._set_status("Исправьте параметры карты настроек", error=True)
             return
+        chain, model = self.chain, self.model_values.copy()
+        self._start_task("Карта настроек", lambda cancel, progress: controller_setting_map(
+            chain, model, component_fraction, flow_fraction, dynamics,
+            controller_type, gains, integral_times, control_limit, setpoint,
+            derivative_time=derivative_time, cancel=cancel, progress=progress),
+            lambda result: self._apply_tuning_map(result, controller_type, derivative_time), "map")
+
+    def _apply_tuning_map(self, map_data, controller_type, derivative_time):
         self.map_data = map_data
         self.map_selection = None
         self.apply_map_selection_button.configure(state="disabled")
@@ -1582,6 +1680,9 @@ class AbsorptionApp(ttk.Frame):
             self._apply_scenario_data(scenario)
 
     def _apply_scenario_data(self, scenario, variant_number=None):
+        self._cancel_task(announce=False)
+        self._undo_clear = None
+        self.undo_clear_button.configure(state="disabled")
         self.applied_scenario = copy.deepcopy(scenario)
         self.model_values = scenario["model_values"].copy()
         self.current_lesson = scenario["lesson"]
@@ -1665,6 +1766,7 @@ class AbsorptionApp(ttk.Frame):
         if self.scenario_editor is not None and self.scenario_editor.winfo_exists():
             if not self.scenario_editor.request_close():
                 return
+        self._cancel_task(announce=False)
         self._save_autosave()
         if hasattr(self, "_autosave_job"):
             self.root.after_cancel(self._autosave_job)
@@ -2140,6 +2242,7 @@ class AbsorptionApp(ttk.Frame):
         }
 
     def _restore_laboratory(self, laboratory, result):
+        self._cancel_task(announce=False)
         scenario = laboratory["scenario"]
         if scenario["name"] not in self.scenarios_by_name:
             self.scenarios = (*self.scenarios, copy.deepcopy(scenario))
@@ -2243,33 +2346,36 @@ class AbsorptionApp(ttk.Frame):
             return
         self._set_status(warning or "Не удалось восстановить лабораторную", error=True)
 
+    @staticmethod
+    def _normalized_input_state(state):
+        result = dict(state)
+        for key, value in result.items():
+            if isinstance(value, str):
+                try:
+                    result[key] = float(value.replace(",", "."))
+                except ValueError:
+                    pass
+        if not result["component_enabled"]:
+            result["component_value"] = None
+        if not result["flow_enabled"]:
+            result["flow_value"] = None
+        if result["disturbance_type"] == "Ступенчатое":
+            result["effect_duration"] = None
+        if not result["controller_enabled"]:
+            for key in ("controller_type", "proportional_gain", "integral_time", "derivative_time", "control_limit", "setpoint"):
+                result[key] = None
+        else:
+            if "I" not in result["controller_type"]:
+                result["integral_time"] = None
+            if "D" not in result["controller_type"]:
+                result["derivative_time"] = None
+        return result
+
     def _mark_result_stale(self, *_):
+        self._invalidate_task()
         if self.last_calculation is None or "input_state" not in self.last_calculation:
             return
-        def normalized(state):
-            result = dict(state)
-            for key, value in result.items():
-                if isinstance(value, str):
-                    try:
-                        result[key] = float(value.replace(",", "."))
-                    except ValueError:
-                        pass
-            if not result["component_enabled"]:
-                result["component_value"] = None
-            if not result["flow_enabled"]:
-                result["flow_value"] = None
-            if result["disturbance_type"] == "Ступенчатое":
-                result["effect_duration"] = None
-            if not result["controller_enabled"]:
-                for key in ("controller_type", "proportional_gain", "integral_time", "derivative_time", "control_limit", "setpoint"):
-                    result[key] = None
-            else:
-                if "I" not in result["controller_type"]:
-                    result["integral_time"] = None
-                if "D" not in result["controller_type"]:
-                    result["derivative_time"] = None
-            return result
-        stale = normalized(self._capture_input_state()) != normalized(self.last_calculation["input_state"])
+        stale = self._normalized_input_state(self._capture_input_state()) != self._normalized_input_state(self.last_calculation["input_state"])
         self.export_summary.set("Параметры изменены — пересчитайте опыт. Экспорт относится к последнему расчёту."
                                 if stale else "Расчёт готов к экспорту.")
         chain_name = "обеднённый газ" if self.last_calculation["chain"] == LEAN_GAS else "насыщенный абсорбент"
@@ -2301,6 +2407,7 @@ class AbsorptionApp(ttk.Frame):
         }
 
     def _restore_input_state(self, state, *, draft=False, preserve_result=False):
+        self._cancel_task(announce=False)
         validate_input_state(state, draft=draft)
         if state["chain"] not in (LEAN_GAS, RICH_ABSORBENT):
             raise ValueError("неизвестная цепь управления")
@@ -2720,6 +2827,7 @@ class AbsorptionApp(ttk.Frame):
         self._set_entry_state(self.flow_entry, self.flow_enabled.get(), self.flow_value)
         enabled = self.component_enabled.get() or self.flow_enabled.get()
         self.calculate_button.configure(state="normal" if enabled else "disabled")
+        self.calculation_hint.set("" if enabled else "Включите хотя бы одно возмущение")
         self._clear_errors()
         self._draw_control_diagram()
 
@@ -2869,20 +2977,20 @@ class AbsorptionApp(ttk.Frame):
             self._set_status("Исправьте значение", error=True)
             return
 
-        try:
-            result = run_simulation(
-                self.chain, self.model_values, component_fraction,
-                flow_fraction, dynamics, controller,
-            )
-        except ValueError as error:
-            self.dynamics_error.set(str(error))
-            self._set_status(str(error), error=True)
-            return
-        result["disturbance_type"] = self.disturbance_type.get()
-        result["input_state"] = self._capture_input_state()
-        result["title"] = self._active_scenario_title()
-        result["lesson"] = copy.deepcopy(self.current_lesson)
+        state = self._capture_input_state()
+        metadata = {"disturbance_type": self.disturbance_type.get(), "input_state": state,
+                    "title": self._active_scenario_title(), "lesson": copy.deepcopy(self.current_lesson)}
+        self._start_task("Расчёт опыта", lambda cancel, progress: run_simulation(
+            state["chain"], state["model_values"], component_fraction, flow_fraction,
+            dynamics, controller, cancel=cancel, progress=progress),
+            lambda result: self._apply_calculation(result, prediction, metadata))
 
+    def _apply_calculation(self, result, prediction, metadata):
+        self._undo_clear = None
+        self.undo_clear_button.configure(state="disabled")
+        result.update(metadata)
+        component_fraction, flow_fraction = result["component_fraction"], result["flow_fraction"]
+        dynamics = result["dynamics"]
         self.baseline_result.set(self._format_number(result["baseline"] * 100) + "%")
         self.disturbance_result.set(
             f"{self._format_number(result['combined_fraction'])} "
@@ -2981,6 +3089,9 @@ class AbsorptionApp(ttk.Frame):
                                                           else self._format_number(metrics["saturation_duration"]) + " с")
 
     def _reset(self):
+        self._cancel_task(announce=False)
+        self._undo_clear = (self._capture_laboratory(), self.last_calculation)
+        self.undo_clear_button.configure(state="normal")
         self.component_enabled.set(False)
         self.flow_enabled.set(False)
         self.component_value.set("")
@@ -2992,7 +3103,31 @@ class AbsorptionApp(ttk.Frame):
         self._clear_result_values()
         self._draw_control_diagram()
         self._draw_static_charts()
-        self._set_status("Готово к расчёту")
+        self.calculation_hint.set("Включите хотя бы одно возмущение")
+        self._set_status("Опыт очищен; динамика, регулятор и история сравнения сохранены")
+
+    def _restore_experiment_defaults(self):
+        self._cancel_task(announce=False)
+        caption = self.active_scenario.get()
+        if self.applied_scenario["controller"] is None:
+            self.controller_type.set("PI")
+            self.proportional_gain.set("2")
+            self.integral_time.set("20")
+            self.derivative_time.set("1")
+            self.control_limit.set("100")
+            self._update_controller_type()
+        self._apply_scenario_data(copy.deepcopy(self.applied_scenario))
+        self.active_scenario.set(caption)
+        self._set_status("Исходные настройки применённого сценария восстановлены")
+
+    def _undo_clear_experiment(self):
+        if self._undo_clear is None:
+            return
+        laboratory, result = self._undo_clear
+        self._undo_clear = None
+        self._restore_laboratory(laboratory, result)
+        self.undo_clear_button.configure(state="disabled")
+        self._set_status("Очистка отменена; опыт восстановлен")
 
     def _clear_result_values(self):
         self.last_calculation = None
@@ -3518,6 +3653,13 @@ def _run_release_check(output_path):
             for scenario in app.scenarios:
                 app._apply_scenario_data(scenario)
                 app._calculate()
+                import time
+                deadline = time.monotonic() + 30
+                while app._task is not None:
+                    if time.monotonic() >= deadline:
+                        raise RuntimeError("Превышено время проверки расчёта.")
+                    root.update()
+                    time.sleep(0.01)
                 if app.last_calculation is None:
                     raise RuntimeError(app.status_text.get())
             report["builtin_scenarios"] = len(app.scenarios)

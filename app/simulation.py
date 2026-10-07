@@ -1,4 +1,5 @@
 import numpy as np
+from .background_tasks import check_cancelled
 
 from .calculations import (
     absorption_balance,
@@ -130,7 +131,8 @@ def eta_steady_state(chain, values, controller):
     return value((low + high) / 2)
 
 
-def eta_controller_response(time, chain, values, component, flow, dynamics, controller, delayed_profile):
+def eta_controller_response(time, chain, values, component, flow, dynamics, controller, delayed_profile,
+                            *, cancel=None, progress=None):
     """One controller changes η; both phase targets follow the common balance."""
     kind = controller["controller_type"]
     gain = controller["controller_gain"]
@@ -161,6 +163,10 @@ def eta_controller_response(time, chain, values, component, flow, dynamics, cont
     steps = np.diff(time)
     decays = np.exp(-steps / dynamics["time_constant"])
     for index in range(time.size):
+        if index % 256 == 0:
+            check_cancelled(cancel)
+            if progress is not None:
+                progress(index / time.size)
         error = setpoint - phases[output][index]
         derivative = (0.0 if index == 0 else
                       -(phases[output][index] - phases[output][index - 1]) / steps[index - 1])
@@ -201,8 +207,11 @@ def run_simulation(
     controller=None,
     *,
     max_step=None,
+    cancel=None,
+    progress=None,
 ):
     """Calculate all open- and closed-loop signals without touching the GUI."""
+    check_cancelled(cancel)
     baseline, calculate = _chain_calculator(chain, model_values)
 
     combined_fraction = combine_fractions(component_fraction, flow_fraction)
@@ -236,16 +245,18 @@ def run_simulation(
         "Совместное воздействие": calculate(component_fraction * delayed_profile,
                                            flow_fraction * delayed_profile),
     }
-    responses = {
-        label: first_order_response(
+    responses = {}
+    for index, (label, target) in enumerate(delayed_targets.items()):
+        responses[label] = first_order_response(
             time,
             baseline,
             target,
             dynamics["time_constant"],
             0.0,
+            cancel=cancel,
         )
-        for label, target in delayed_targets.items()
-    }
+        if progress is not None:
+            progress((index + 1) / 7)
     permanent = dynamics["kind"] in ("step", "ramp")
     terminal_profile = 1.0 if permanent else 0.0
     stationary_from = (dynamics["start_time"] + dynamics["delay"]
@@ -273,6 +284,8 @@ def run_simulation(
         controlled_phases, error, control = eta_controller_response(
             time, chain, model_values, component_fraction, flow_fraction,
             dynamics, controller, delayed_profile,
+            cancel=cancel,
+            progress=None if progress is None else lambda value: progress((4 + 2 * value) / 7),
         )
         controlled_response = controlled_phases["xog" if chain == LEAN_GAS else "xna"]
         final_response = controlled_response
@@ -328,7 +341,10 @@ def run_simulation(
             else "Нет"
         )
 
-    return {
+    check_cancelled(cancel)
+    if progress is not None:
+        progress(6 / 7)
+    result = {
         "chain": chain,
         "model_version": MODEL_FORMAT_VERSION,
         "model_values": dict(model_values),
@@ -338,7 +354,7 @@ def run_simulation(
             key: first_order_response(time, float(absorption_balance(**model_values)[key]),
                 absorption_balance(**disturbed_inputs(chain, model_values,
                     component_fraction * delayed_profile, flow_fraction * delayed_profile))[key],
-                dynamics["time_constant"]) for key in ("xog", "xna")
+                dynamics["time_constant"], cancel=cancel) for key in ("xog", "xna")
         },
         "component_fraction": component_fraction,
         "flow_fraction": flow_fraction,
@@ -371,6 +387,10 @@ def run_simulation(
             "saturation_duration": metrics["saturation_duration"],
         },
     }
+    check_cancelled(cancel)
+    if progress is not None:
+        progress(1.0)
+    return result
 
 
 def _settling_duration(settling_time, response_start):

@@ -2,6 +2,7 @@ import copy
 import tempfile
 import tkinter as tk
 import unittest
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -61,6 +62,7 @@ class GuiStateTests(unittest.TestCase):
         app.predicted_correction.set("Регулятор выключен")
         app.predicted_steady.set("26.27")
         app._calculate()
+        self.wait_for_task()
         original = app.last_calculation
         app._add_current_to_comparison()
         app.learning_mode.set(True)
@@ -145,7 +147,98 @@ class GuiStateTests(unittest.TestCase):
             self.app = main.AbsorptionApp(self.root)
         self.app._apply_scenario_data(self.app.scenarios[1])
         self.app._calculate()
+        self.wait_for_task()
         self.root.update_idletasks()
+
+    def wait_for_task(self):
+        deadline = time.monotonic() + 10
+        while self.app._task is not None:
+            self.assertLess(time.monotonic(), deadline, "Background task timed out")
+            self.root.update()
+            time.sleep(0.005)
+
+    def test_background_map_keeps_tk_timer_responsive_and_can_be_cancelled(self):
+        app = self.app
+        app._show_page("tuning_map")
+        original = app.last_calculation
+        ticks = []
+        self.root.after(0, lambda: ticks.append(True))
+        app.map_grid_size.set("15")
+        app._calculate_tuning_map()
+        task = app._task
+        self.root.update()
+        self.assertTrue(ticks)
+        self.assertIsNotNone(task)
+        app._cancel_task()
+        task.thread.join(2)
+        self.assertFalse(task.thread.is_alive())
+        self.assertIsNone(app.map_data)
+        self.assertIs(app.last_calculation, original)
+
+    def test_changed_form_cancels_work_but_equivalent_number_does_not(self):
+        from threading import Event
+        release = Event()
+        original = self.app.last_calculation
+        def slow_result(cancel, progress):
+            release.wait(2)
+            return original
+        self.app._start_task("Проверка", slow_result, lambda result: self.fail("Stale result applied"))
+        task = self.app._task
+        self.app.component_value.set(self.app.component_value.get().replace(".", ",") + "00")
+        self.assertIs(self.app._task, task)
+        self.app.component_value.set("0.2")
+        self.assertIsNone(self.app._task)
+        self.assertTrue(task.cancel.is_set())
+        release.set()
+        task.thread.join(2)
+        self.assertIs(self.app.last_calculation, original)
+
+    def test_cancelled_prediction_does_not_consume_attempt_and_clear_is_undoable(self):
+        app = self.app
+        app.current_lesson["attempt_limit"] = 3
+        app.assignment_enabled.set(True)
+        app.predicted_direction.set("Уменьшится")
+        app.predicted_fastest.set("Без сравнения")
+        app.predicted_correction.set("Регулятор выключен")
+        app.predicted_steady.set("26.27")
+        original = app.last_calculation
+        app._calculate()
+        app._cancel_task()
+        self.assertEqual(app.assignment_attempts, 0)
+        self.assertIs(app.last_calculation, original)
+        app._reset()
+        self.assertIsNone(app.last_calculation)
+        app.comparison_counter = 7
+        app._undo_clear_experiment()
+        self.assertIs(app.last_calculation, original)
+        self.assertEqual(app.assignment_attempts, 0)
+        self.assertEqual(app.comparison_counter, 7)
+
+    def test_defaults_restore_disabled_controller_and_preserve_variant_title(self):
+        app = self.app
+        caption = "Применён: Снижение состава на 15% · вариант 5."
+        app.active_scenario.set(caption)
+        app.controller_type.set("PID")
+        app.proportional_gain.set("19")
+        app.integral_time.set("3")
+        app._restore_experiment_defaults()
+        self.assertEqual(app.controller_type.get(), "PI")
+        self.assertEqual(app.proportional_gain.get(), "2")
+        self.assertEqual(app.integral_time.get(), "20")
+        self.assertEqual(app.active_scenario.get(), caption)
+
+    def test_new_task_wins_even_when_old_worker_finishes_later(self):
+        from threading import Event
+        release = Event()
+        applied = []
+        self.app._start_task("Старый", lambda cancel, progress: release.wait(2), applied.append)
+        old_task = self.app._task
+        self.app._start_task("Новый", lambda cancel, progress: "new", applied.append)
+        self.wait_for_task()
+        release.set()
+        old_task.thread.join(2)
+        self.root.update()
+        self.assertEqual(applied, ["new"])
 
     def tearDown(self):
         if hasattr(self, "root"):

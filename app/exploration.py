@@ -5,6 +5,7 @@ import copy
 import numpy as np
 
 from .simulation import run_simulation
+from .background_tasks import check_cancelled
 
 
 SENSITIVITY_PARAMETERS = (
@@ -32,6 +33,7 @@ def sensitivity_runs(
     controller,
     parameter,
     values,
+    *, cancel=None, progress=None,
 ):
     """Return a simulation for every selected value of one parameter."""
     if parameter not in SENSITIVITY_PARAMETERS:
@@ -39,7 +41,8 @@ def sensitivity_runs(
     if not values:
         raise ValueError("Укажите хотя бы одно значение параметра.")
     runs = []
-    for value in values:
+    for index, value in enumerate(values):
+        check_cancelled(cancel)
         adjusted_dynamics = copy.deepcopy(dynamics)
         adjusted_component = component_fraction
         adjusted_flow = flow_fraction
@@ -58,6 +61,8 @@ def sensitivity_runs(
             adjusted_flow,
             adjusted_dynamics,
             controller,
+            cancel=cancel,
+            progress=None if progress is None else lambda fraction: progress((index + fraction) / len(values)),
         )
         runs.append({"value": value, "result": result})
     return runs
@@ -75,6 +80,7 @@ def controller_setting_map(
     control_limit,
     setpoint,
     derivative_time=0.0,
+    *, cancel=None, progress=None,
 ):
     """Classify a grid of P, PI, or PID controller settings."""
     if controller_type not in ("P", "PI", "PID"):
@@ -91,6 +97,7 @@ def controller_setting_map(
     assessments = [[None for _gain in gains] for _row in rows]
     for row, integral_time in enumerate(rows):
         for column, gain in enumerate(gains):
+            check_cancelled(cancel)
             controller = {
                 "controller_type": controller_type,
                 "controller_gain": gain,
@@ -106,6 +113,9 @@ def controller_setting_map(
                 flow_fraction,
                 dynamics,
                 controller,
+                cancel=cancel,
+                progress=None if progress is None else lambda fraction: progress(
+                    (row * len(gains) + column + fraction) / (len(rows) * len(gains))),
             )
             results[row][column] = result
             assessment = assess_controller_result(result)

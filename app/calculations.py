@@ -87,8 +87,11 @@ def first_order_response(
     target,
     time_constant,
     delay=0.0,
+    *, cancel=None,
 ):
     """Simulate T·dy/dt + y = yуст for a time-varying target value."""
+    from .background_tasks import check_cancelled
+    check_cancelled(cancel)
     time, target = _validate_time_series(time, target)
     if time_constant <= 0:
         raise ValueError("Постоянная времени должна быть больше нуля.")
@@ -100,6 +103,8 @@ def first_order_response(
     response[0] = baseline
 
     for index in range(1, time.size):
+        if index % 256 == 1:
+            check_cancelled(cancel)
         decay = np.exp(-(time[index] - time[index - 1]) / time_constant)
         interval_target = delayed_target[index - 1]
         response[index] = interval_target + (response[index - 1] - interval_target) * decay
