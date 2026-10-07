@@ -8,6 +8,7 @@ from pathlib import Path
 import numpy as np
 from matplotlib.figure import Figure
 
+from .controller_extensions import EXTENSION_FIELDS
 from .laboratory import format_protocol
 from .simulation import LEAN_GAS
 from .plotting import adaptive_legend
@@ -41,6 +42,12 @@ def write_csv(selected_path, result):
             ("Ошибка e(t), доля", result["error"]),
             ("Степень извлечения η(t), доля", result["control"]),
         ))
+    for key, label in (("measurement", "Измеренный выход, доля"),
+                       ("measurement_error", "Измеренная ошибка, доля"),
+                       ("commanded_control", "Командная η, доля"),
+                       ("rate_limited", "Ограничение скорости η, 0/1")):
+        if result.get(key) is not None:
+            columns.append((label, result[key].astype(int) if key == "rate_limited" else result[key]))
     path = Path(selected_path)
     with path.open("w", encoding="utf-8-sig", newline="") as file:
         writer = csv.writer(file, delimiter=";")
@@ -84,6 +91,11 @@ def build_protocol(result, title):
             ("Задание", f"{controller['setpoint'] * 100:g}%"),
         ))
 
+        parameters.extend((label, f"{controller.get(key, 0) * scale:g}")
+                          for key, label, scale in EXTENSION_FIELDS)
+        if controller.get("noise_std", 0) > 0:
+            parameters.append(("Шаг источника шума", "0.1 с; линейная интерполяция"))
+
     metrics = result["metrics"]
     relative_deviation = metrics["relative_deviation"]
     settling_time = metrics["settling_time"]
@@ -118,6 +130,8 @@ def build_protocol(result, title):
         ("Длительность насыщения η", "не применимо без регулятора" if metrics["saturation_duration"] is None
          else f"{metrics['saturation_duration']:.8g} с"),
     ]
+    if controller is not None:
+        results.append(("Ограничение скорости η", f"{metrics.get('rate_limit_duration', 0):.8g} с"))
     balance = result["stationary_balance"]
     for key in ("j", "gog", "gna", "mass_residual", "component_residual"):
         results.append((key + " (полная амплитуда, исходная η)", f"{float(balance[key]):.8g} кг/ч"))

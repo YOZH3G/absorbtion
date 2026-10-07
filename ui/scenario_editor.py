@@ -3,6 +3,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 from app.calculations import CONTROLLER_TYPES, DEFAULT_MODEL_VALUES
+from app.controller_extensions import EXTENSION_FIELDS, extensions_from_form
 from app.validation import parse_percentage, parse_nonnegative_number
 from app.laboratory import FASTEST_OPTIONS
 from .model_dialog import ModelParametersDialog
@@ -74,6 +75,8 @@ class ScenarioEditorDialog(tk.Toplevel):
             "answer_fastest": tk.StringVar(),
             "answer_correction": tk.StringVar(),
         }
+        self._variables.update({key: tk.StringVar(value="0") for key, _label, _scale in EXTENSION_FIELDS})
+        self._variables["noise_std"].trace_add("write", lambda *_: self._update_dependent_states() if hasattr(self, "_extension_entries") and not self._loading_form else None)
         self._status = tk.StringVar()
         self._source = tk.StringVar()
         self._search = tk.StringVar()
@@ -383,9 +386,11 @@ class ScenarioEditorDialog(tk.Toplevel):
         self._derivative_entry = self._entry(tab, 4, "Время дифференцирования Td, с", "derivative_time")
         self._limit_entry = self._entry(tab, 5, "Предел Δη, п.п.", "control_limit")
         self._setpoint_entry = self._entry(tab, 6, "Задание, % (пусто = базовое)", "setpoint")
-        ttk.Separator(tab).grid(row=7, column=0, columnspan=2, sticky="ew", pady=14)
-        self._entry(tab, 8, "Допуск прогноза установившегося значения, %", "steady_tolerance_percent")
-        self._entry(tab, 9, "Абсолютный допуск прогноза, п.п.", "steady_absolute_tolerance")
+        self._extension_entries = {key: self._entry(tab, row, label, key)
+                                   for row, (key, label, _scale) in enumerate(EXTENSION_FIELDS, 7)}
+        ttk.Separator(tab).grid(row=12, column=0, columnspan=2, sticky="ew", pady=14)
+        self._entry(tab, 13, "Допуск прогноза установившегося значения, %", "steady_tolerance_percent")
+        self._entry(tab, 14, "Абсолютный допуск прогноза, п.п.", "steady_absolute_tolerance")
 
     def _build_lesson_tab(self, tab):
         tab.columnconfigure(1, weight=1)
@@ -562,6 +567,8 @@ class ScenarioEditorDialog(tk.Toplevel):
             "effect_duration": self._format_number(scenario["effect_duration"]),
             "time_constant": self._format_number(scenario["time_constant"]),
             "delay": self._format_number(scenario["delay"]),
+            **{key: self._format_number((controller or {}).get(key, 0) * scale)
+               for key, _label, scale in EXTENSION_FIELDS},
             "controller_enabled": controller is not None,
             "controller_type": "PI" if controller is None else controller["type"],
             "gain": "2" if controller is None else self._format_number(controller["gain"]),
@@ -741,6 +748,14 @@ class ScenarioEditorDialog(tk.Toplevel):
         self._derivative_entry.configure(
             state="normal" if controller_enabled and "D" in controller_type else "disabled"
         )
+        for key, entry in self._extension_entries.items():
+            active = controller_enabled and (key != "derivative_filter_time" or "D" in controller_type)
+            if key == "noise_seed":
+                try:
+                    active = controller_enabled and float(self._variables["noise_std"].get().replace(",", ".")) > 0
+                except ValueError:
+                    active = False
+            entry.configure(state="normal" if active else "disabled")
         self._update_lesson_states()
 
     def _update_lesson_states(self):
@@ -945,6 +960,8 @@ class ScenarioEditorDialog(tk.Toplevel):
         if self._variables["controller_enabled"].get():
             setpoint_text = self._variables["setpoint"].get().strip()
             controller = {
+                **extensions_from_form({key: self._variables[key].get() for key, _label, _scale in EXTENSION_FIELDS},
+                                       self._variables["controller_type"].get()),
                 "type": self._variables["controller_type"].get(),
                 "gain": self._variables["gain"].get(),
                 "integral_time": self._variables["integral_time"].get(),

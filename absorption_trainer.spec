@@ -7,7 +7,7 @@ from zipfile import ZipFile
 from PyInstaller.utils.hooks.tcl_tk import tcltk_info
 
 
-data_files = [("data/builtin_scenarios.json", "data")]
+data_files = [("data/builtin_scenarios.json", "data"), ("data/identification_step.csv", "data")]
 if sys.platform == "win32" and tcltk_info.tcl_data_dir.startswith("//zipfs:"):
     # Tcl/Tk 9 keeps its scripts in external archives, missed by the hook.
     for library, target in (("tcl", "_tcl_data"), ("tk", "_tk_data")):

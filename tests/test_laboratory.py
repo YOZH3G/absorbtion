@@ -24,7 +24,8 @@ class ScenarioTests(unittest.TestCase):
     def test_priority_four_scenarios_are_available(self):
         names = {scenario["name"] for scenario in SCENARIOS}
 
-        self.assertEqual(len(SCENARIOS), 6)
+        self.assertEqual(len(SCENARIOS), 7)
+        self.assertIn("Шум датчика и ограничения η", names)
         self.assertIn("Увеличение расхода на 10%", names)
         self.assertIn("Снижение состава на 15%", names)
         self.assertIn("Противоположные воздействия", names)

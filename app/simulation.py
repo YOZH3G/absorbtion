@@ -1,5 +1,6 @@
 import numpy as np
 from .background_tasks import check_cancelled
+from .controller_extensions import normalize_extensions
 
 from .calculations import (
     absorption_balance,
@@ -41,6 +42,12 @@ def simulation_time_grid(dynamics, controller=None, max_step=None):
             step = min(step, controller["integral_time"] / (100 * max(1.0, gain)))
         if "D" in controller["controller_type"] and controller["derivative_time"] > 0:
             step = min(step, controller["derivative_time"] / 40)
+        extensions = normalize_extensions(controller)
+        for key in ("derivative_filter_time", "actuator_time_constant"):
+            if extensions[key] > 0 and (key != "derivative_filter_time" or "D" in controller["controller_type"]):
+                step = min(step, extensions[key] / 40)
+        if extensions["noise_std"] > 0:
+            step = min(step, 0.01)
         if delay > 0:
             step = min(step, delay / 20)
     if max_step is not None:
@@ -146,6 +153,7 @@ def eta_controller_response(time, chain, values, component, flow, dynamics, cont
         raise ValueError("Время интегрирования Ti должно быть больше нуля.")
     if not 0 <= setpoint <= 1:
         raise ValueError("Задание концентрации должно быть в диапазоне 0…1.")
+    extensions = normalize_extensions(controller)
     low, high = _eta_bounds(values, controller)
     inputs = disturbed_inputs(chain, values, component * delayed_profile, flow * delayed_profile)
     # Validate every disturbed concentration and both ends of the actuator range.
@@ -159,6 +167,18 @@ def eta_controller_response(time, chain, values, component, flow, dynamics, cont
     output = "xog" if chain == LEAN_GAS else "xna"
     direction = -1 if chain == LEAN_GAS else 1
     control = np.empty_like(time)
+    commanded = np.empty_like(time)
+    measurement = np.empty_like(time)
+    rate_limited = np.zeros(time.size, dtype=bool)
+    noise = np.zeros_like(time)
+    if extensions["noise_std"] > 0:
+        samples = int(np.ceil(time[-1] / 0.1)) + 1
+        if samples > MAX_TIME_POINTS:
+            raise ValueError("Шум измерения: слишком длинный опыт для интервала 0.1 с.")
+        source_noise = np.random.default_rng(extensions["noise_seed"]).normal(0, extensions["noise_std"], samples)
+        noise = np.interp(time, np.arange(samples) * 0.1, source_noise)
+    actuator = extensions["actuator_time_constant"] > 0 or extensions["actuator_rate_limit"] > 0
+    filtered_derivative = 0.0
     integral = 0.0
     steps = np.diff(time)
     decays = np.exp(-steps / dynamics["time_constant"])
@@ -167,10 +187,29 @@ def eta_controller_response(time, chain, values, component, flow, dynamics, cont
             check_cancelled(cancel)
             if progress is not None:
                 progress(index / time.size)
-        error = setpoint - phases[output][index]
+        measurement[index] = phases[output][index] + noise[index]
+        error = setpoint - measurement[index]
         derivative = (0.0 if index == 0 else
-                      -(phases[output][index] - phases[output][index - 1]) / steps[index - 1])
+                      -(measurement[index] - measurement[index - 1]) / steps[index - 1])
+        if "D" in kind and extensions["derivative_filter_time"] > 0 and index > 0:
+            decay = np.exp(-steps[index - 1] / extensions["derivative_filter_time"])
+            filtered_derivative = decay * filtered_derivative + (1 - decay) * derivative
+            derivative = filtered_derivative
+        if actuator:
+            if index == 0:
+                control[index] = values["eta"]
+            else:
+                interval = steps[index - 1]
+                change = commanded[index - 1] - control[index - 1]
+                if extensions["actuator_time_constant"] > 0:
+                    change *= -np.expm1(-interval / extensions["actuator_time_constant"])
+                if extensions["actuator_rate_limit"] > 0:
+                    maximum = extensions["actuator_rate_limit"] * interval
+                    rate_limited[index - 1] = abs(change) > maximum
+                    change = np.clip(change, -maximum, maximum)
+                control[index] = np.clip(control[index - 1] + change, low, high)
         step = steps[index] if index < steps.size else 0.0
+        old_integral = integral
         candidate_integral = integral + error * step if "I" in kind else 0.0
 
         def command(accumulated):
@@ -185,7 +224,15 @@ def eta_controller_response(time, chain, values, component, flow, dynamics, cont
         elif "I" in kind and gain > 0:
             integral = ti * ((clipped - values["eta"]) / (direction * gain)
                              - error - (td * derivative if "D" in kind else 0.0))
-        control[index] = clipped
+        commanded[index] = clipped
+        if not actuator:
+            control[index] = clipped
+        elif "I" in kind and index > 0 and rate_limited[index - 1]:
+            # Freeze accumulation only when error pushes into the active rate limit.
+            # Keep the commanded target independent of the numerical time step.
+            if (clipped - control[index]) * direction * error > 0:
+                integral = old_integral
+                commanded[index] = np.clip(command(integral), low, high)
         if index == steps.size:
             break
         delayed_eta = np.interp(time[index] - dynamics["delay"], time[:index + 1],
@@ -195,7 +242,7 @@ def eta_controller_response(time, chain, values, component, flow, dynamics, cont
                    "xna": (ga[index] * xa[index] + transfer) / (ga[index] + transfer)}
         for key in phases:
             phases[key][index + 1] = targets[key] + (phases[key][index] - targets[key]) * decays[index]
-    return phases, setpoint - phases[output], control
+    return phases, setpoint - phases[output], control, measurement, commanded, rate_limited
 
 
 def run_simulation(
@@ -275,13 +322,14 @@ def run_simulation(
     controlled_phases = None
     error = None
     control = None
+    measurement = commanded_control = rate_limited = None
     if controller is None:
         final_response = responses["Совместное воздействие"]
         metrics = open_metrics
         response_start = dynamics["start_time"] + dynamics["delay"]
         result_mode = "Без регулятора"
     else:
-        controlled_phases, error, control = eta_controller_response(
+        controlled_phases, error, control, measurement, commanded_control, rate_limited = eta_controller_response(
             time, chain, model_values, component_fraction, flow_fraction,
             dynamics, controller, delayed_profile,
             cancel=cancel,
@@ -307,6 +355,7 @@ def run_simulation(
         saturated = (np.isclose(control[:-1], low, rtol=0, atol=1e-8)
                      | np.isclose(control[:-1], high, rtol=0, atol=1e-8))
         metrics["saturation_duration"] = float(np.sum(np.diff(time)[saturated]))
+        metrics["rate_limit_duration"] = float(np.sum(np.diff(time)[rate_limited[:-1]]))
         response_start = (
             dynamics["delay"]
             if controller["setpoint"] != baseline
@@ -370,6 +419,10 @@ def run_simulation(
         "controlled_response": controlled_response,
         "error": error,
         "control": control,
+        "measurement": measurement,
+        "measurement_error": None if controller is None else controller["setpoint"] - measurement,
+        "commanded_control": commanded_control,
+        "rate_limited": rate_limited,
         "final_response": final_response,
         "metrics": metrics,
         "response_start": response_start,

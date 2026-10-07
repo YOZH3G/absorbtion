@@ -80,7 +80,7 @@ def controller_setting_map(
     control_limit,
     setpoint,
     derivative_time=0.0,
-    *, cancel=None, progress=None,
+    *, extensions=None, cancel=None, progress=None,
 ):
     """Classify a grid of P, PI, or PID controller settings."""
     if controller_type not in ("P", "PI", "PID"):
@@ -99,6 +99,7 @@ def controller_setting_map(
         for column, gain in enumerate(gains):
             check_cancelled(cancel)
             controller = {
+                **(extensions or {}),
                 "controller_type": controller_type,
                 "controller_gain": gain,
                 "integral_time": 1.0 if integral_time is None else integral_time,

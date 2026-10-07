@@ -422,6 +422,126 @@ class GuiStateTests(unittest.TestCase):
         finally:
             editor.destroy()
 
+    def test_sensor_settings_round_trip_and_teacher_dependent_fields(self):
+        import numpy as np
+        app = self.app
+        app._set_controller_mode(True)
+        app.controller_type.set("PID")
+        app.extension_values["noise_std"].set("0,05")
+        app.extension_values["noise_seed"].set("2026")
+        app.extension_values["derivative_filter_time"].set("0,5")
+        app.extension_values["actuator_time_constant"].set("2")
+        app.extension_values["actuator_rate_limit"].set("2")
+        app._calculate()
+        self.wait_for_task()
+        result = app.last_calculation
+        restored = restore_calculation(app._capture_laboratory()["last_calculation"])
+        for key in ("control", "commanded_control", "measurement", "final_response"):
+            np.testing.assert_array_equal(restored[key], result[key])
+        app.extension_values["actuator_time_constant"].set("3")
+        self.assertIn("Параметры изменены", app.export_summary.get())
+        editor = ScenarioEditorDialog(self.root, self.store, lambda *_: None,
+                                      lambda *_: None, lambda: None, main.BACKGROUND)
+        try:
+            editor._load_scenario(self.store.scenarios[-1])
+            editor._editable = True
+            editor._variables["controller_enabled"].set(True)
+            editor._variables["noise_std"].set("0")
+            editor._update_dependent_states()
+            self.assertEqual(str(editor._extension_entries["noise_seed"]["state"]), "disabled")
+            editor._variables["noise_std"].set("0,05")
+            self.assertEqual(str(editor._extension_entries["noise_seed"]["state"]), "normal")
+        finally:
+            editor.destroy()
+
+    def test_both_charts_remain_visible_after_closed_loop_redraw(self):
+        app = self.app
+        self.root.deiconify()
+        self.root.geometry("1366x1000+0+0")
+        self.root.tk.call("tk", "scaling", 96 / 72)
+        self.root.update()
+        app._set_controller_mode(True)
+        app._calculate()
+        self.wait_for_task()
+        app._set_chart_mode("both")
+        deadline = time.monotonic() + .4
+        while time.monotonic() < deadline:
+            self.root.update()
+            time.sleep(.01)
+        self.assertEqual(app.chart_mode, "both")
+        self.assertGreater(app.chart_panes.sashpos(0), 100)
+        self.assertTrue(all(card.winfo_ismapped() for card in app.chart_cards))
+
+    def test_shared_cursor_modes_and_identification_workflow(self):
+        from types import SimpleNamespace
+        import numpy as np
+        app = self.app
+        page = app.identification_page
+        page.load_path(Path(main.__file__).parent / "data" / "identification_step.csv")
+        app._show_page("identification")
+        page.calculate()
+        self.wait_for_task()
+        self.assertIsNotNone(page.result)
+        self.assertAlmostEqual(page.result["time_constant"], 8, delta=.08)
+        original_model = app.model_values.copy()
+        original_gain = app.proportional_gain.get()
+        app.time_cursor.move(SimpleNamespace(inaxes=app.response_axis, xdata=20))
+        self.assertTrue(all(readout.get().startswith("t = 20 с") for readout in app.chart_readouts))
+        np.testing.assert_array_equal(page.result["residual"], page.result["output"] - page.result["model"])
+        page.apply()
+        self.assertEqual(app.model_values, original_model)
+        self.assertEqual(app.proportional_gain.get(), original_gain)
+        self.assertAlmostEqual(float(app.delay.get()), 2, delta=.2)
+        self.assertEqual(app.current_page, "controller")
+        app._set_controller_mode(True)
+        app._calculate()
+        self.wait_for_task()
+        for mode, ylabel, axes in (("Только ошибка", "Ошибка e(t), п.п.", 1),
+                                  ("Только управление", "η, %", 1),
+                                  ("Ошибка и управление", "Ошибка e(t), п.п.", 2)):
+            app.controller_signal_mode.set(mode)
+            app._redraw_signal_mode()
+            self.assertEqual(app.disturbance_axis.get_ylabel(), ylabel)
+            self.assertEqual(len(app.disturbance_axis.figure.axes), axes)
+        before = page.result
+        page.columns[0].set(page.columns[1].get())
+        page.calculate()
+        self.assertIs(page.result, before)
+        self.assertIn("три разных столбца", page.summary.get())
+
+    def test_identification_completion_preserves_navigation_and_changed_selection_cancels(self):
+        from threading import Event
+        from app.identification import identify_step
+        from test_identification import experiment
+        app = self.app
+        page = app.identification_page
+        result = dict(identify_step(*experiment()), source="example.csv", columns=("t", "u", "y"), units=("с", "как в файле", "как в файле"))
+        app._show_page("identification")
+        release = Event()
+        def calculate(cancel, progress):
+            release.wait(2)
+            return result
+        app._start_task("Идентификация", calculate, page.accept, "identification")
+        app._show_page("disturbances")
+        title = app.primary_chart_title.get()
+        release.set()
+        self.wait_for_task()
+        self.assertIs(page.result, result)
+        self.assertEqual(app.primary_chart_title.get(), title)
+        app._show_page("identification")
+        app._add_current_to_comparison()
+        self.assertEqual(app.current_page, "comparison")
+        self.assertTrue(app._charts_show_comparison)
+        release.clear()
+        app._start_task("Идентификация", calculate, page.accept, "identification")
+        task = app._task
+        page.units[0].set("мин")
+        self.assertIsNone(app._task)
+        self.assertTrue(task.cancel.is_set())
+        self.assertIs(page.result, result)
+        release.set()
+        task.thread.join(2)
+
     def test_model_edits_keep_the_calculation_and_report_uses_its_graphs(self):
         result = self.app.last_calculation
         self.app._open_model_parameters()

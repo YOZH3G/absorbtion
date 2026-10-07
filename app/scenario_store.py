@@ -7,6 +7,7 @@ from pathlib import Path
 
 from .calculations import CONTROLLER_TYPES, DEFAULT_MODEL_VALUES, absorption_balance
 from .laboratory import SCENARIOS, normalize_lesson
+from .controller_extensions import normalize_extensions
 from .validation import MAX_FRACTION, MIN_FRACTION
 
 
@@ -299,6 +300,7 @@ def _normalize_controller(controller):
             strict=True,
         ),
         "setpoint": setpoint,
+        **normalize_extensions(controller),
     }
 
 

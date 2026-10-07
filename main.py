@@ -12,7 +12,7 @@ from matplotlib.colors import ListedColormap
 from matplotlib.figure import Figure
 
 APP_NAME = "Анализ процесса абсорбции"
-APP_VERSION = "1.5.3"
+APP_VERSION = "1.5.4"
 
 from app.calculations import (
     CONTROLLER_TYPES,
@@ -54,8 +54,11 @@ from app.session_store import read_laboratory_session, restore_calculation, vali
 from app.settings_store import SettingsStore
 from app.plotting import adaptive_legend
 from app.simulation import LEAN_GAS, RICH_ABSORBENT, run_simulation, tune_balanced_controller
+from app.controller_extensions import EXTENSION_DEFAULTS, EXTENSION_FIELDS, extensions_from_form
 from app.validation import parse_disturbance, parse_value_list, parse_nonnegative_number, parse_positive_number, parse_percentage
 from ui.model_dialog import ModelParametersDialog
+from ui.identification_page import IdentificationPage
+from ui.chart_tools import SharedTimeCursor
 from ui.scenario_editor import ScenarioEditorDialog
 from ui.window_geometry import fit_geometry, work_area
 from ui.ui_helpers import (
@@ -136,6 +139,8 @@ class AbsorptionApp(ttk.Frame):
         self.effect_duration = tk.StringVar(value="10")
         self.time_constant = tk.StringVar(value="10")
         self.delay = tk.StringVar(value="2")
+        self.extension_values = {key: tk.StringVar(value="0") for key in EXTENSION_DEFAULTS}
+        self.extension_entries = {}
         self.controller_enabled = tk.BooleanVar(value=False)
         self.controller_type = tk.StringVar(value="PI")
         self.proportional_gain = tk.StringVar(value="2")
@@ -251,23 +256,27 @@ class AbsorptionApp(ttk.Frame):
         self.chart_mode = self.settings["chart_mode"]
         self.chart_mode_label = tk.StringVar()
         self.chart_cards = []
+        self.chart_readouts = []
+        self.controller_signal_mode = tk.StringVar(value="Ошибка и управление")
         self._page_context = {}
         self._layout_jobs = []
 
         self._configure_window()
         self._configure_styles()
         self._build_layout()
+        self.time_cursor = SharedTimeCursor(((self.disturbance_canvas, self.disturbance_toolbar, self.chart_readouts[0]),
+                                              (self.response_canvas, self.response_toolbar, self.chart_readouts[1])))
         self._update_lesson_summary()
         self._update_learning_route()
         self._select_chain(LEAN_GAS)
         for variable in (self.component_enabled, self.flow_enabled, self.component_value, self.flow_value,
                          self.disturbance_type, self.start_time, self.simulation_duration, self.effect_duration,
                          self.time_constant, self.delay, self.controller_enabled, self.controller_type,
-                         self.proportional_gain, self.integral_time, self.derivative_time, self.control_limit, self.setpoint):
+                         self.proportional_gain, self.integral_time, self.derivative_time, self.control_limit, self.setpoint, *self.extension_values.values()):
             variable.trace_add("write", self._mark_result_stale)
         for variable in (self.assignment_enabled, self.predicted_direction, self.predicted_steady,
                          self.predicted_fastest, self.predicted_correction, self.sensitivity_parameter,
-                         self.sensitivity_values, self.map_controller_type, self.map_gain_min,
+                         *self.extension_values.values(), self.sensitivity_values, self.map_controller_type, self.map_gain_min,
                          self.map_gain_max, self.map_integral_min, self.map_integral_max,
                          self.map_derivative_time, self.map_grid_size):
             variable.trace_add("write", self._invalidate_task)
@@ -386,9 +395,10 @@ class AbsorptionApp(ttk.Frame):
             ("export", "Отчёт"),
             ("sensitivity", "Чувствительность"),
             ("tuning_map", "Карта настроек"),
+            ("identification", "Идентификация"),
         )
         self.nav_icons = {
-            key: create_icon(self.root, key)
+            key: create_icon(self.root, "sensitivity" if key == "identification" else key)
             for key, _label in active_navigation
         }
         self.nav_labels = dict(active_navigation)
@@ -446,6 +456,7 @@ class AbsorptionApp(ttk.Frame):
             "controller",
             "sensitivity",
             "tuning_map",
+            "identification",
             "scenarios",
             "export",
         ):
@@ -465,6 +476,8 @@ class AbsorptionApp(ttk.Frame):
         self._build_tuning_map_card(self.page_contents["tuning_map"])
         self._build_scenarios_card(self.page_contents["scenarios"])
         self._build_export_card(self.page_contents["export"])
+        self.identification_page = IdentificationPage(self.page_contents["identification"], self)
+        self.identification_page.grid(row=0, column=0, sticky="nsew")
         for page in self.pages.values():
             page.bind_mousewheel()
 
@@ -580,23 +593,27 @@ class AbsorptionApp(ttk.Frame):
         self._refresh_chart_modes()
         self.chart_mode_label.set("Оба" if mode == "both" else "Отклик" if mode == "response" else self._upper_chart_label())
         if mode == "both":
-            self._schedule_layout(self._restore_chart_split)
+            self._schedule_layout(self._restore_chart_split, delay=10)
 
     def _refresh_chart_modes(self):
         if hasattr(self, "chart_mode_box"):
             self.chart_mode_box.configure(values=("Оба", self._upper_chart_label(), "Отклик"))
             self.chart_mode_label.set("Оба" if self.chart_mode == "both" else "Отклик" if self.chart_mode == "response" else self._upper_chart_label())
 
-    def _schedule_layout(self, callback):
+    def _schedule_layout(self, callback, delay=0):
         def apply():
             self._layout_jobs.remove(job)
             callback()
-        job = self.root.after_idle(apply)
+        job = self.root.after(delay, apply) if delay else self.root.after_idle(apply)
         self._layout_jobs.append(job)
 
     def _restore_chart_split(self):
         if len(self.chart_panes.panes()) == 2:
             self.chart_panes.sashpos(0, int(self.chart_panes.winfo_height() * self.settings["chart_split"]))
+
+    def _ensure_chart_split(self, _event=None):
+        if len(self.chart_panes.panes()) == 2 and self.chart_panes.winfo_height() > 100 and self.chart_panes.sashpos(0) == 0:
+            self._schedule_layout(self._restore_chart_split, delay=10)
 
     def _restore_layout(self):
         if len(self.main_panes.panes()) == 2:
@@ -635,6 +652,7 @@ class AbsorptionApp(ttk.Frame):
             "tuning_map": "Карта настроек регулятора",
             "scenarios": "Задание",
             "export": "Отчёт",
+            "identification": "Идентификация по CSV",
         }
         previous_page = self.current_page
         if previous_page in self.pages and previous_page != page:
@@ -649,6 +667,10 @@ class AbsorptionApp(ttk.Frame):
             if focus is not None and focus.winfo_exists():
                 focus.focus_set()
         self.page_title.set(titles[page])
+        if hasattr(self, "signal_mode_box"):
+            available = (page not in ("comparison", "sensitivity", "tuning_map", "identification")
+                         and self.last_calculation is not None and self.last_calculation["controller"] is not None)
+            self.signal_mode_box.configure(state="readonly" if available else "disabled")
         for key, button in self.nav_buttons.items():
             button.configure(style="SelectedSidebarNav.TButton" if key == page else "SidebarNav.TButton")
         if previous_page == "comparison" and page != "comparison":
@@ -673,6 +695,13 @@ class AbsorptionApp(ttk.Frame):
             self._draw_sensitivity()
         elif page == "tuning_map":
             self._draw_tuning_map()
+        elif page == "identification":
+            self.metric_strip.grid_remove()
+            self._remove_map_colorbar()
+            self._clear_map_click_callback()
+            self.identification_page.draw()
+        elif previous_page == "identification" and page != "comparison":
+            self._draw_last_calculation()
         elif page != "comparison" and previous_page in ("comparison", "sensitivity", "tuning_map") and self._charts_show_comparison:
             self._remove_map_colorbar()
             self._clear_map_click_callback()
@@ -980,7 +1009,19 @@ class AbsorptionApp(ttk.Frame):
         ).grid(row=9, column=0, columnspan=2, sticky="w", pady=(5, 0))
         parameters.columnconfigure(0, weight=1)
 
-        explanation = self._card(parent, 2, padding=(14, 10))
+        extensions = self._card(parent, 2, padding=(14, 10))
+        extensions.columnconfigure(0, weight=1)
+        ttk.Label(extensions, text="Датчик и механизм", style="CardTitle.TLabel").grid(row=0, column=0, columnspan=2, sticky="w")
+        for row, (key, label, scale) in enumerate(EXTENSION_FIELDS, 1):
+            ttk.Label(extensions, text=label, style="Body.TLabel").grid(row=row, column=0, sticky="w", pady=3)
+            entry = ttk.Entry(extensions, textvariable=self.extension_values[key], width=12, state="disabled")
+            entry.grid(row=row, column=1, sticky="e", padx=(10, 0), pady=3)
+            self.extension_entries[key] = entry
+            self.controller_entries.append(entry)
+        ttk.Label(extensions, text="Ноль отключает шум, фильтр, инерцию или предел скорости. Начальное число повторяет шум.",
+                  style="Muted.TLabel", wraplength=330).grid(row=6, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        self.extension_values["noise_std"].trace_add("write", lambda *_: self._update_controller_type())
+        explanation = self._card(parent, 3, padding=(14, 10))
         ttk.Label(explanation, text="Учебная модель", style="CardTitle.TLabel").grid(
             row=0, column=0, sticky="w", pady=(0, 6)
         )
@@ -1134,7 +1175,9 @@ class AbsorptionApp(ttk.Frame):
         elif kind == "map":
             signature.extend(variable.get() for variable in (self.map_controller_type, self.map_gain_min,
                              self.map_gain_max, self.map_integral_min, self.map_integral_max,
-                             self.map_derivative_time, self.map_grid_size))
+                             self.map_derivative_time, self.map_grid_size, *self.extension_values.values()))
+        if kind == "identification":
+            signature.append(self.identification_page.signature())
         return signature
 
     def _start_task(self, name, calculate, apply, kind="calculation"):
@@ -1168,6 +1211,8 @@ class AbsorptionApp(ttk.Frame):
         value, error = outcome
         if error is not None:
             self.task_progress.configure(value=0)
+            if self._task_kind == "identification" and not isinstance(error, CalculationCancelled):
+                self.identification_page.summary.set(str(error))
             self._set_status("Расчёт отменён" if isinstance(error, CalculationCancelled) else str(error),
                              error=not isinstance(error, CalculationCancelled))
             return
@@ -1260,6 +1305,7 @@ class AbsorptionApp(ttk.Frame):
             )
             control_limit = parse_percentage(self.control_limit.get())
             setpoint = parse_percentage(self.setpoint.get())
+            extensions = extensions_from_form({key: value.get() for key, value in self.extension_values.items()}, controller_type)
         except ValueError as error:
             self.map_summary.set(str(error))
             self._set_status("Исправьте параметры карты настроек", error=True)
@@ -1268,7 +1314,7 @@ class AbsorptionApp(ttk.Frame):
         self._start_task("Карта настроек", lambda cancel, progress: controller_setting_map(
             chain, model, component_fraction, flow_fraction, dynamics,
             controller_type, gains, integral_times, control_limit, setpoint,
-            derivative_time=derivative_time, cancel=cancel, progress=progress),
+            derivative_time=derivative_time, extensions=extensions, cancel=cancel, progress=progress),
             lambda result: self._apply_tuning_map(result, controller_type, derivative_time), "map")
 
     def _apply_tuning_map(self, map_data, controller_type, derivative_time):
@@ -1735,6 +1781,7 @@ class AbsorptionApp(ttk.Frame):
         figure = Figure(figsize=(7, 3), dpi=100, facecolor=CARD_BACKGROUND, constrained_layout=True)
         axis = figure.add_subplot(111)
         canvas = FigureCanvasTkAgg(figure, master=plot_host)
+        canvas.mpl_connect("draw_event", self._ensure_chart_split)
         canvas.get_tk_widget().grid(row=0, column=0, sticky="nsew")
 
         hidden_toolbar_host = ttk.Frame(card, style="CardBody.TFrame")
@@ -1743,14 +1790,36 @@ class AbsorptionApp(ttk.Frame):
 
         tools = ttk.Frame(header, style="CardBody.TFrame")
         tools.grid(row=2, column=1, sticky="e")
+        tool_buttons = {}
+        def update_tools(_event=None):
+            for key, button in tool_buttons.items():
+                active = key == "Увеличение" and "zoom" in str(toolbar.mode) or key == "Перемещение" and "pan" in str(toolbar.mode)
+                button.configure(style="SelectedSegment.TButton" if active else "Toolbar.TButton")
+        def tool(command):
+            if hasattr(self, "time_cursor"):
+                self.time_cursor.clear()
+            command()
+            update_tools()
         for column, (label, command) in enumerate((
-            ("Сброс", toolbar.home),
-            ("Zoom", toolbar.zoom),
-            ("Pan", toolbar.pan),
-            ("PNG", toolbar.save_figure),
+            ("Сброс", toolbar.home), ("Увеличение", toolbar.zoom),
+            ("Перемещение", toolbar.pan), ("Сохранить PNG", toolbar.save_figure),
         )):
-            ttk.Button(tools, text=label, command=command, style="Toolbar.TButton", width=7).grid(row=0, column=column, padx=(4, 0))
+            button = ttk.Button(tools, text=label, command=lambda command=command: tool(command),
+                                style="Toolbar.TButton")
+            button.grid(row=0, column=column, padx=(4, 0))
+            tool_buttons[label] = button
+        toolbar._visible_buttons = tool_buttons
+        canvas.mpl_connect("key_release_event", update_tools)
+        readout = tk.StringVar()
+        self.chart_readouts.append(readout)
+        ttk.Label(card, textvariable=readout, style="Hint.TLabel", wraplength=950).grid(
+            row=2, column=0, sticky="ew", padx=12, pady=3)
         index = len(self.chart_cards) - 1
+        if index == 0:
+            self.signal_mode_box = ttk.Combobox(header, textvariable=self.controller_signal_mode,
+                values=("Ошибка и управление", "Только ошибка", "Только управление"), state="readonly", width=22)
+            self.signal_mode_box.grid(row=3, column=0, columnspan=2, sticky="w", pady=4)
+            self.signal_mode_box.bind("<<ComboboxSelected>>", lambda _event: self._redraw_signal_mode())
         ttk.Button(header, text="Развернуть / вернуть", command=lambda: self._set_chart_mode(
             "both" if self.chart_mode != "both" else "input" if index == 0 else "response"),
             style="Toolbar.TButton").grid(row=2, column=0, sticky="w", pady=(4, 0))
@@ -1811,6 +1880,8 @@ class AbsorptionApp(ttk.Frame):
         self._update_disturbance_type()
 
         controller = scenario["controller"]
+        for key, label, scale in EXTENSION_FIELDS:
+            self.extension_values[key].set(format((controller or {}).get(key, 0) * scale, ".15g"))
         if controller is None:
             self._set_controller_mode(False)
         else:
@@ -2510,6 +2581,8 @@ class AbsorptionApp(ttk.Frame):
     @staticmethod
     def _normalized_input_state(state):
         result = dict(state)
+        for key in EXTENSION_DEFAULTS:
+            result.setdefault(key, 0)
         for key, value in result.items():
             if isinstance(value, str):
                 try:
@@ -2528,13 +2601,16 @@ class AbsorptionApp(ttk.Frame):
         if result["disturbance_type"] == "Ступенчатое":
             result["effect_duration"] = None
         if not result["controller_enabled"]:
-            for key in ("controller_type", "proportional_gain", "integral_time", "derivative_time", "control_limit", "setpoint"):
+            for key in ("controller_type", "proportional_gain", "integral_time", "derivative_time", "control_limit", "setpoint", *EXTENSION_DEFAULTS):
                 result[key] = None
         else:
             if "I" not in result["controller_type"]:
                 result["integral_time"] = None
             if "D" not in result["controller_type"]:
                 result["derivative_time"] = None
+                result["derivative_filter_time"] = None
+            if result["noise_std"] == 0:
+                result["noise_seed"] = None
         return result
 
     def _mark_result_stale(self, *_):
@@ -2566,6 +2642,7 @@ class AbsorptionApp(ttk.Frame):
             "effect_duration": self.effect_duration.get(),
             "time_constant": self.time_constant.get(),
             "delay": self.delay.get(),
+            **{key: value.get() for key, value in self.extension_values.items()},
             "controller_enabled": self.controller_enabled.get(),
             "controller_type": self.controller_type.get(),
             "proportional_gain": self.proportional_gain.get(),
@@ -2592,6 +2669,8 @@ class AbsorptionApp(ttk.Frame):
         self.model_values = restored_model
         self._set_disturbance_units(state.get("disturbance_units", "fraction"))
         self._select_chain(state["chain"])
+        for key, variable in self.extension_values.items():
+            variable.set(state.get(key, "0"))
         for key, variable in (
             ("component_enabled", self.component_enabled),
             ("flow_enabled", self.flow_enabled),
@@ -2705,6 +2784,7 @@ class AbsorptionApp(ttk.Frame):
         self._charts_show_comparison = True
 
     def _export_graphs_png(self):
+        self.time_cursor.clear()
         selected = filedialog.asksaveasfilename(
             parent=self.root,
             title="Сохранить графики",
@@ -2777,6 +2857,7 @@ class AbsorptionApp(ttk.Frame):
         self._save_lab_report("pdf", write_pdf_report)
 
     def _save_lab_report(self, format_name, writer):
+        self.time_cursor.clear()
         selected = filedialog.asksaveasfilename(
             parent=self.root,
             title="Сохранить отчёт лабораторной работы",
@@ -2883,6 +2964,14 @@ class AbsorptionApp(ttk.Frame):
             self.control_limit_entry: enabled,
             self.setpoint_entry: enabled,
         }
+        for key, entry in self.extension_entries.items():
+            active = enabled and (key != "derivative_filter_time" or "D" in controller_type)
+            if key == "noise_seed":
+                try:
+                    active = enabled and float(self.extension_values["noise_std"].get().replace(",", ".")) > 0
+                except ValueError:
+                    active = False
+            states[entry] = active
         for entry, active in states.items():
             entry.configure(state="normal" if active else "disabled")
 
@@ -3132,7 +3221,14 @@ class AbsorptionApp(ttk.Frame):
                 self._show_page("controller")
                 raise
 
+        try:
+            extensions = extensions_from_form({key: variable.get() for key, variable in self.extension_values.items()}, controller_type)
+        except ValueError as problem:
+            self.controller_error.set(str(problem))
+            self._show_page("controller")
+            raise
         return {
+            **extensions,
             "controller_type": controller_type,
             "controller_gain": parsed["Коэффициент K"],
             "integral_time": parsed.get("Время интегрирования Ti", 1.0),
@@ -3514,6 +3610,8 @@ class AbsorptionApp(ttk.Frame):
     def _draw_calculation_result(self, result):
         dynamics = result["dynamics"]
         controller = result["controller"]
+        self.signal_mode_box.configure(state="readonly" if controller is not None and self.current_page not in (
+            "comparison", "sensitivity", "tuning_map", "identification") else "disabled")
         if controller is None:
             self._draw_disturbance(
                 result["time"],
@@ -3534,6 +3632,8 @@ class AbsorptionApp(ttk.Frame):
                 result["error"],
                 result["control"],
                 dynamics,
+                result.get("commanded_control") if any(controller.get(key, 0) > 0
+                    for key in ("actuator_time_constant", "actuator_rate_limit")) else None,
             )
             self._draw_control_comparison(
                 result["time"],
@@ -3543,6 +3643,7 @@ class AbsorptionApp(ttk.Frame):
                 controller["controller_type"],
                 dynamics,
                 result["metrics"],
+                result.get("measurement") if controller.get("noise_std", 0) > 0 else None,
             )
         self._charts_show_comparison = False
 
@@ -3590,7 +3691,11 @@ class AbsorptionApp(ttk.Frame):
         self._enable_legend_toggles(self.response_axis, self.response_canvas)
         self.response_canvas.draw_idle()
 
-    def _draw_controller_signals(self, time, error, control, dynamics=None):
+    def _redraw_signal_mode(self):
+        if self.last_calculation is not None and self.last_calculation["controller"] is not None and not self._charts_show_comparison and self.current_page != "identification":
+            self._draw_calculation_result(self.last_calculation)
+
+    def _draw_controller_signals(self, time, error, control, dynamics=None, commanded=None):
         self._remove_controller_axis()
         self.primary_chart_title.set("Ошибка и управляющее воздействие")
         self.primary_chart_subtitle.set("Сигналы замкнутой системы")
@@ -3604,23 +3709,41 @@ class AbsorptionApp(ttk.Frame):
         self.disturbance_axis.axhline(0.0, color=MUTED, linestyle="--", linewidth=1)
         self._annotate_timing(self.disturbance_axis, dynamics)
 
-        self.controller_signal_axis = self.disturbance_axis.twinx()
-        control_line = self.controller_signal_axis.plot(
+        mode = self.controller_signal_mode.get()
+        if mode == "Только ошибка":
+            self._place_legend_above(self.disturbance_axis)
+            self._enable_legend_toggles(self.disturbance_axis, self.disturbance_canvas)
+            self.disturbance_canvas.draw_idle()
+            return
+        if mode == "Только управление":
+            self._style_axis(self.disturbance_axis, "Время, с", "η, %")
+            self.controller_signal_axis = None
+            control_axis = self.disturbance_axis
+        else:
+            self.controller_signal_axis = self.disturbance_axis.twinx()
+            control_axis = self.controller_signal_axis
+        control_line = control_axis.plot(
             *plot_samples(time, control * 100),
             color="#16A34A",
             linewidth=2,
             label="Степень извлечения η(t), %",
         )[0]
-        self.controller_signal_axis.set_ylabel("Степень извлечения η(t), %", color=TEXT)
-        self.controller_signal_axis.tick_params(colors=TEXT)
-        self.controller_signal_axis.spines["top"].set_visible(False)
-        self.controller_signal_axis.spines["right"].set_color(BORDER)
+        lines = [control_line] if mode == "Только управление" else [error_line, control_line]
+        if commanded is not None:
+            control_line.set_label("Фактическая η, %")
+            lines.append(control_axis.plot(*plot_samples(time, commanded * 100),
+                         color="#7C3AED", linestyle="--", linewidth=1.5, label="Командная η, %")[0])
+        control_axis.set_ylabel("η, %", color=TEXT)
+        control_axis.tick_params(colors=TEXT)
+        control_axis.spines["top"].set_visible(False)
+        control_axis.spines["right"].set_color(BORDER)
         self.disturbance_axis.margins(x=0.02, y=0.15)
         self._place_legend_above(
             self.disturbance_axis,
-            [error_line, control_line],
-            [error_line.get_label(), control_line.get_label()],
+            lines,
+            [line.get_label() for line in lines],
         )
+        self._enable_legend_toggles(self.disturbance_axis, self.disturbance_canvas)
         self.disturbance_canvas.draw_idle()
 
     def _draw_control_comparison(
@@ -3632,6 +3755,7 @@ class AbsorptionApp(ttk.Frame):
         controller_type,
         dynamics=None,
         metrics=None,
+        measurement=None,
     ):
         self.response_chart_title.set(f"Без регулятора / {controller_type}-регулятор")
         self._style_axis(self.response_axis, "Время, с", "X, %")
@@ -3654,6 +3778,9 @@ class AbsorptionApp(ttk.Frame):
             linewidth=2.4,
             label=f"{controller_type}-регулятор",
         )
+        if measurement is not None:
+            self.response_axis.plot(*plot_samples(time, measurement * 100), color="#64748B",
+                                    linewidth=0.6, alpha=0.55, label="Измеренный выход")
         self._annotate_transition(self.response_axis, dynamics, metrics)
         self.response_axis.margins(x=0.02, y=0.12)
         self._place_legend_above(self.response_axis)
@@ -3844,6 +3971,18 @@ def _run_release_check(output_path):
                 if app.last_calculation is None:
                     raise RuntimeError(app.status_text.get())
             report["builtin_scenarios"] = len(app.scenarios)
+            app.identification_page.load_path(Path(__file__).resolve().parent / "data" / "identification_step.csv")
+            app.identification_page.calculate()
+            deadline = time.monotonic() + 30
+            while app._task is not None:
+                if time.monotonic() >= deadline:
+                    raise RuntimeError("Превышено время проверки идентификации.")
+                root.update()
+                time.sleep(0.01)
+            fitted = app.identification_page.result
+            if fitted is None or abs(fitted["time_constant"] - 8) > .08 or abs(fitted["delay"] - 2) > .2:
+                raise RuntimeError("Учебный CSV не восстановил эталонную динамику.")
+            report["identification_verified"] = True
             expected = app.last_calculation["final_response"].copy()
             app.student_conclusion.set("Проверка восстановления релиза")
             app._save_autosave()

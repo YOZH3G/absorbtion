@@ -11,6 +11,7 @@ import numpy as np
 from .calculations import DEFAULT_MODEL_VALUES, IMPULSE, RAMP, RECTANGLE, STEP, absorption_balance
 from .scenario_store import DISTURBANCE_TYPES, normalize_scenario
 from .laboratory import CORRECTION_OPTIONS, DIRECTION_OPTIONS, FASTEST_OPTIONS, normalize_lesson
+from .controller_extensions import EXTENSION_DEFAULTS, extensions_from_form
 from .validation import parse_disturbance, parse_nonnegative_number, parse_percentage, parse_positive_number
 
 
@@ -164,6 +165,9 @@ def validate_input_state(state, *, draft=False):
     if not isinstance(values, dict) or set(values) != set(DEFAULT_MODEL_VALUES):
         raise ValueError("Снимок: нужны все пять параметров модели.")
     absorption_balance(**{key: _finite_number(value, key) for key, value in values.items()})
+    for key in EXTENSION_DEFAULTS:
+        if key in state and not isinstance(state[key], str):
+            raise ValueError(f"Снимок: {key} должно быть текстом поля.")
     if draft:
         return copy.deepcopy(state)
     scenario = {
@@ -181,6 +185,7 @@ def validate_input_state(state, *, draft=False):
     if state["controller_enabled"]:
         kind = state["controller_type"]
         scenario["controller"] = {
+            **extensions_from_form(state, kind),
             "type": kind, "gain": parse_nonnegative_number(state["proportional_gain"]),
             "integral_time": parse_positive_number(state["integral_time"]) if "I" in kind else 1,
             "derivative_time": parse_nonnegative_number(state["derivative_time"]) if "D" in kind else 0,
@@ -303,7 +308,8 @@ def restore_calculation(snapshot):
                                                 "time_constant", "delay")}}
     controller = scenario["controller"]
     if controller is not None:
-        controller = {"controller_type": controller["type"], "controller_gain": controller["gain"],
+        controller = {**{key: scenario["controller"][key] for key in EXTENSION_DEFAULTS},
+            "controller_type": controller["type"], "controller_gain": controller["gain"],
                       **{key: controller[key] for key in ("integral_time", "derivative_time", "control_limit", "setpoint")}}
     result = run_simulation(scenario["chain"], scenario["model_values"], scenario["component"] or 0,
                             scenario["flow"] or 0, dynamics, controller)
