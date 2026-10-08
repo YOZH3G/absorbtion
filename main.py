@@ -11,8 +11,8 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolb
 from matplotlib.colors import ListedColormap
 from matplotlib.figure import Figure
 
-APP_NAME = "Анализ процесса абсорбции"
-APP_VERSION = "1.6.0"
+APP_NAME = "Учебный стенд физических моделей"
+APP_VERSION = "1.7.0"
 
 from app.calculations import (
     CONTROLLER_TYPES,
@@ -58,6 +58,7 @@ from app.controller_extensions import EXTENSION_DEFAULTS, EXTENSION_FIELDS, exte
 from app.validation import parse_disturbance, parse_value_list, parse_nonnegative_number, parse_positive_number, parse_percentage
 from ui.model_dialog import ModelParametersDialog
 from ui.identification_page import IdentificationPage
+from ui.tank_page import TankPage
 from ui.chart_tools import SharedTimeCursor
 from ui.scenario_editor import ScenarioEditorDialog
 from ui.window_geometry import fit_geometry, work_area
@@ -285,6 +286,7 @@ class AbsorptionApp(ttk.Frame):
         self.autosave_path = self.scenario_store.path.with_name("laboratory.autosave.json")
         self._autosave_signature = None
         self._restore_autosave()
+        self._show_page(self.current_page)
         self._autosave_job = self.root.after(5000, self._autosave_tick)
 
     def _configure_window(self):
@@ -357,6 +359,11 @@ class AbsorptionApp(ttk.Frame):
         self.route_button = ttk.Button(topbar, textvariable=self.route_stage,
                                        command=self._advance_learning_step, style="Toolbar.TButton")
         self.route_button.grid(row=0, column=1, sticky="e")
+        self.selected_model = tk.StringVar(value="Абсорбер")
+        model_box = ttk.Combobox(topbar, textvariable=self.selected_model, values=("Абсорбер", "Бак"),
+                                state="readonly", width=12)
+        model_box.grid(row=0, column=2, sticky="e", padx=(12, 0))
+        model_box.bind("<<ComboboxSelected>>", self._select_model)
         ttk.Label(
             topbar,
             textvariable=self.topbar_context,
@@ -457,6 +464,7 @@ class AbsorptionApp(ttk.Frame):
             "sensitivity",
             "tuning_map",
             "identification",
+            "tank",
             "scenarios",
             "export",
         ):
@@ -478,6 +486,8 @@ class AbsorptionApp(ttk.Frame):
         self._build_export_card(self.page_contents["export"])
         self.identification_page = IdentificationPage(self.page_contents["identification"], self)
         self.identification_page.grid(row=0, column=0, sticky="nsew")
+        self.tank_page = TankPage(self.page_contents["tank"], self)
+        self.tank_page.grid(row=0, column=0, sticky="nsew")
         for page in self.pages.values():
             page.bind_mousewheel()
 
@@ -498,6 +508,7 @@ class AbsorptionApp(ttk.Frame):
         self.undo_clear_button.grid(row=1, column=1, sticky="ew", pady=(6, 0))
         self.calculation_hint = tk.StringVar(value="Включите хотя бы одно возмущение")
         ttk.Label(actions, textvariable=self.calculation_hint, style="Error.TLabel", wraplength=310).grid(row=2, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        self.absorber_action_widgets = list(actions.winfo_children())
         self.cancel_button = ttk.Button(actions, text="Отменить расчёт", command=self._cancel_task, state="disabled")
         self.cancel_button.grid(row=3, column=0, sticky="ew", pady=(6, 0))
         self.task_progress = ttk.Progressbar(actions, maximum=100)
@@ -572,6 +583,8 @@ class AbsorptionApp(ttk.Frame):
             self._set_chart_mode("response")
 
     def _upper_chart_label(self):
+        if self.current_page == "tank":
+            return "Подача и отбор"
         if self.current_page in ("comparison", "sensitivity", "tuning_map"):
             return {"comparison": "Сравнение", "sensitivity": "Чувствительность", "tuning_map": "Карта настроек"}[self.current_page]
         return "Сигналы регулятора" if self.controller_enabled.get() else "Воздействие"
@@ -641,6 +654,10 @@ class AbsorptionApp(ttk.Frame):
             ttk.Label(card, text=label, style="MetricTitle.TLabel", wraplength=160).grid(row=0, column=0, sticky="w")
             ttk.Label(card, textvariable=variable, style="MetricValue.TLabel").grid(row=1, column=0, sticky="w", pady=(4, 0))
 
+    def _select_model(self, _event=None):
+        self._cancel_task(announce=False)
+        self._show_page("tank" if self.selected_model.get() == "Бак" else getattr(self, "_absorber_page", "disturbances"))
+
     def _show_page(self, page):
         titles = {
             "disturbances": "Параметры опыта",
@@ -653,6 +670,7 @@ class AbsorptionApp(ttk.Frame):
             "scenarios": "Задание",
             "export": "Отчёт",
             "identification": "Идентификация по CSV",
+            "tank": "Бак: опыт и регулирование",
         }
         previous_page = self.current_page
         if previous_page in self.pages and previous_page != page:
@@ -660,6 +678,22 @@ class AbsorptionApp(ttk.Frame):
             self._page_context[previous_page] = (self.pages[previous_page].canvas.yview()[0],
                 focus if focus is not None and str(focus).startswith(str(self.pages[previous_page])) else None)
         self.current_page = page
+        if page == "tank":
+            if previous_page != "tank": self._absorber_context = self.topbar_context.get()
+            self.topbar_context.set("Бак: объёмный баланс, локальная модель и PI; уровень в метрах")
+        elif previous_page == "tank":
+            self.topbar_context.set(getattr(self,"_absorber_context","Абсорбер"))
+            for axis in (self.disturbance_axis,self.response_axis):
+                axis.figure.set_layout_engine("constrained")
+        self.sidebar_title.configure(text="БАК" if page == "tank" else "АБСОРБЦИЯ")
+        self.selected_model.set("Бак" if page == "tank" else "Абсорбер")
+        if page != "tank":
+            self._absorber_page = page
+        elif previous_page != "tank":
+            self._cancel_task(announce=False)
+        for widget in self.absorber_action_widgets:
+            widget.grid_remove() if page == "tank" else widget.grid()
+        self.route_button.grid_remove() if page == "tank" else self.route_button.grid()
         self.pages[page].tkraise()
         if page in self._page_context:
             scroll, focus = self._page_context[page]
@@ -668,9 +702,10 @@ class AbsorptionApp(ttk.Frame):
                 focus.focus_set()
         self.page_title.set(titles[page])
         if hasattr(self, "signal_mode_box"):
-            available = (page not in ("comparison", "sensitivity", "tuning_map", "identification")
+            available = (page not in ("comparison", "sensitivity", "tuning_map", "identification", "tank")
                          and self.last_calculation is not None and self.last_calculation["controller"] is not None)
             self.signal_mode_box.configure(state="readonly" if available else "disabled")
+            self.signal_mode_box.grid_remove() if page == "tank" else self.signal_mode_box.grid()
         for key, button in self.nav_buttons.items():
             button.configure(style="SelectedSidebarNav.TButton" if key == page else "SidebarNav.TButton")
         if previous_page == "comparison" and page != "comparison":
@@ -700,7 +735,10 @@ class AbsorptionApp(ttk.Frame):
             self._remove_map_colorbar()
             self._clear_map_click_callback()
             self.identification_page.draw()
-        elif previous_page == "identification" and page != "comparison":
+        elif page == "tank":
+            self.metric_strip.grid_remove()
+            self.tank_page.draw()
+        elif previous_page in ("identification", "tank") and page != "comparison":
             self._draw_last_calculation()
         elif page != "comparison" and previous_page in ("comparison", "sensitivity", "tuning_map") and self._charts_show_comparison:
             self._remove_map_colorbar()
@@ -1156,6 +1194,8 @@ class AbsorptionApp(ttk.Frame):
         return component_fraction, flow_fraction, self._read_dynamic_parameters()
 
     def _task_signature(self, kind):
+        if kind == "tank":
+            return [self.selected_model.get(), self.tank_page.signature()]
         steady_prediction = self.predicted_steady.get()
         try:
             steady_prediction = float(steady_prediction.replace(",", "."))
@@ -1213,6 +1253,8 @@ class AbsorptionApp(ttk.Frame):
             self.task_progress.configure(value=0)
             if self._task_kind == "identification" and not isinstance(error, CalculationCancelled):
                 self.identification_page.summary.set(str(error))
+            if self._task_kind == "tank" and not isinstance(error, CalculationCancelled):
+                self.tank_page.summary.set(str(error))
             self._set_status("Расчёт отменён" if isinstance(error, CalculationCancelled) else str(error),
                              error=not isinstance(error, CalculationCancelled))
             return
@@ -2475,6 +2517,8 @@ class AbsorptionApp(ttk.Frame):
             "conclusion": self.student_conclusion.get(), "page": self.current_page,
             "selected_runs": list(self.comparison_table.selection()), "last_calculation": snapshot,
             "identification": self.identification_page.capture(),
+            "selected_model": "level_tank" if self.current_page == "tank" else "absorber",
+            "tank": self.tank_page.capture(),
         }
 
     def _restore_laboratory(self, laboratory, result):
@@ -2534,6 +2578,7 @@ class AbsorptionApp(ttk.Frame):
                                          + f"\nОсталось попыток: {self.current_lesson['attempt_limit'] - self.assignment_attempts}.")
         self._refresh_comparison_table(laboratory["selected_runs"])
         self.identification_page.restore(laboratory.get("identification"))
+        self.tank_page.restore(laboratory.get("tank"))
         self._show_page(laboratory["page"])
         self._mark_result_stale()
         self.calculate_button_text.set("Проверить прогноз" if self.assignment_enabled.get()
@@ -3700,7 +3745,7 @@ class AbsorptionApp(ttk.Frame):
         self.response_canvas.draw_idle()
 
     def _redraw_signal_mode(self):
-        if self.last_calculation is not None and self.last_calculation["controller"] is not None and not self._charts_show_comparison and self.current_page != "identification":
+        if self.last_calculation is not None and self.last_calculation["controller"] is not None and not self._charts_show_comparison and self.current_page not in ("identification", "tank"):
             self._draw_calculation_result(self.last_calculation)
 
     def _draw_controller_signals(self, time, error, control, dynamics=None, commanded=None):
@@ -4013,6 +4058,27 @@ def _run_release_check(output_path):
             from app.exporting import write_experiment_report
             write_experiment_report(Path(directory)/"experiment.html", page.capture(), "html")
             expected_experiment = page.capture()
+            app._show_page("tank")
+            tank = app.tank_page
+            def wait_tank():
+                deadline = time.monotonic()+30
+                while app._task is not None:
+                    if time.monotonic() >= deadline:
+                        raise RuntimeError("Превышено время проверки бака.")
+                    root.update(); time.sleep(.01)
+            tank.generate(); wait_tank()
+            tank.identify(); wait_tank()
+            tank.check_pi(); wait_tank()
+            if tank.fit is None or tank.pi is None or len(tank.pi["cases"]) != 8:
+                raise RuntimeError(tank.summary.get())
+            from app.tank import DEFAULTS, simulate
+            independent = simulate(dict(DEFAULTS,step_time=10.,pump_step=.0005))
+            tank.validation = dict(validate_step(independent["time"],independent["pump"],independent["level"],tank.fit),
+                                   source="release-tank-validation.csv",origin=tank.origin(),revision=tank.revision)
+            from app.tank_exporting import write_tank_report
+            expected_tank = tank.capture()
+            for extension in ("csv","html","pdf"):
+                write_tank_report(Path(directory)/f"tank.{extension}",expected_tank,extension)
             expected = app.last_calculation["final_response"].copy()
             app.student_conclusion.set("Проверка восстановления релиза")
             app._save_autosave()
@@ -4030,6 +4096,9 @@ def _run_release_check(output_path):
             if app.identification_page.capture() != expected_experiment:
                 raise RuntimeError("Эксперимент и проверка PI восстановлены неточно.")
             report["experiment_workflow_verified"] = True
+            if app.current_page != "tank" or app.tank_page.capture() != expected_tank:
+                raise RuntimeError("Не удалось точно восстановить работу с баком.")
+            report["tank_workflow_verified"] = True
             app._close_application()
             root = None
             report.update(status="passed", gui_started=True, autosave_restored=True)

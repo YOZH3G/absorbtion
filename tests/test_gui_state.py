@@ -15,6 +15,81 @@ from ui.scenario_editor import ScenarioEditorDialog
 
 
 class GuiStateTests(unittest.TestCase):
+    def test_tank_complete_workflow_roundtrip_units_and_atomic_import(self):
+        import json
+        import numpy as np
+        from app.tank_exporting import write_tank_report
+        from app.tank_state import validate_tank_state
+        app, page = self.app, self.app.tank_page
+        absorber = copy.deepcopy(app._capture_input_state())
+        app._show_page("tank")
+        page.generate(); self.wait_for_task()
+        self.assertGreater(len(page.rows),17)
+        page.identify(); self.wait_for_task()
+        self.assertIsNotNone(page.fit, page.summary.get())
+        self.assertLess(page.fit["delay"],1.)
+        self.assertAlmostEqual(page.fit["gain"],200.,delta=15.)
+        from app.tank import DEFAULTS, simulate
+        separate=simulate(dict(DEFAULTS,step_time=10.,pump_step=.0005))
+        import csv
+        independent=Path(self.directory.name)/"independent-tank.csv"
+        with independent.open("w",newline="",encoding="utf-8") as stream:
+            writer=csv.writer(stream,delimiter=";"); writer.writerow(page.headers)
+            writer.writerows(zip(separate["time"],separate["pump"],separate["level"]))
+        original_fit=copy.deepcopy(page.fit)
+        page.same_signals.set(True)
+        with patch("ui.tank_page.filedialog.askopenfilename",return_value=str(independent)):
+            page.validate_file()
+        self.wait_for_task()
+        self.assertIsNotNone(page.validation,page.summary.get())
+        self.assertEqual(page.fit,original_fit)
+        independent.unlink()
+        page.fields["gain"].set("0.02")
+        page.check_pi(); self.wait_for_task()
+        self.assertIsNotNone(page.pi,page.summary.get())
+        self.assertEqual(len(page.pi["cases"]),8)
+        snapshot=page.capture()
+        validate_tank_state(snapshot)
+        for path in (("result",),("pi","cases",0,"controller"),("result","baseline_pump"),("fit","origin","units")):
+            malformed=copy.deepcopy(snapshot)
+            target=malformed
+            for key in path[:-1]: target=target[key]
+            if path[-1]=="controller": target[path[-1]]=None
+            else: del target[path[-1]]
+            with self.subTest(path=path),self.assertRaises(ValueError): page.restore(malformed)
+            self.assertEqual(page.capture(),snapshot)
+        with patch("main.filedialog.asksaveasfilename",return_value=str(Path(self.directory.name)/"tank-session.json")):
+            app._save_comparison_session()
+        page.restore(None)
+        with patch("main.filedialog.askopenfilename",return_value=str(Path(self.directory.name)/"tank-session.json")):
+            app._open_comparison_session()
+        self.assertEqual(page.capture(),snapshot)
+        self.assertEqual(app.selected_model.get(),"Бак")
+        self.assertEqual(app._capture_input_state(),absorber)
+        for fmt in ("csv","html","pdf"):
+            output=Path(self.directory.name)/f"tank.{fmt}"
+            write_tank_report(output,snapshot,fmt)
+            self.assertGreater(output.stat().st_size,1000)
+        malformed=copy.deepcopy(snapshot)
+        malformed["pi"]["cases"][0]["pump"][0]=1000.
+        with self.assertRaises(ValueError): validate_tank_state(malformed)
+        session=Path(self.directory.name)/"tank-session.json"
+        payload=json.loads(session.read_text(encoding="utf-8")); payload["laboratory"]["tank"]=malformed
+        session.write_text(json.dumps(payload),encoding="utf-8")
+        with patch("main.filedialog.askopenfilename",return_value=str(session)),patch("main.messagebox.showerror"):
+            app._open_comparison_session()
+        self.assertEqual(page.capture(),snapshot)
+        # Physical units convert before fitting, without an absorber percentage scale.
+        arrays=page.arrays()
+        page.restoring=True
+        page.rows=[[str(float(t)/60),str(float(q)*1000),str(float(h)*100)] for t,q,h in zip(*arrays)]
+        for var,value in zip(page.units,("мин","л/с","см")): var.set(value)
+        page.restoring=False
+        np.testing.assert_allclose(page.arrays(),arrays,rtol=1e-12)
+        app._show_page("disturbances")
+        self.assertEqual(app.selected_model.get(),"Абсорбер")
+        self.assertEqual(app._capture_input_state(),absorber)
+
     def test_complete_experiment_workflow_restores_snapshots_and_exports_reports(self):
         import csv
         import json

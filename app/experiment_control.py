@@ -5,6 +5,7 @@ import numpy as np
 
 from .background_tasks import check_cancelled
 from .calculations import tune_controller_parameters
+from .pi_control import pi_update
 
 
 def validate_step(time, signal, output, parameters, *, cancel=None):
@@ -103,14 +104,7 @@ def compare_pi(result, input_role, output_role, setpoint, horizon, gain, integra
             if index % 256 == 0:
                 check_cancelled(cancel)
             error = setpoint - output[index]
-            candidate = integral + signed_gain * error * dt / ti
-            raw = eta0 + signed_gain * error + candidate
-            clipped = float(np.clip(raw, 0, 1))
-            if (raw - clipped) * (candidate - integral) <= 0:
-                integral = candidate
-            else:
-                raw = eta0 + signed_gain * error + integral
-                clipped = float(np.clip(raw, 0, 1))
+            clipped, integral = pi_update(error, signed_gain, ti, dt, eta0, 0., 1., integral)
             control[index] = clipped
             delayed_time = time[index] - delay
             delayed = eta0 if delayed_time < 0 else float(np.interp(delayed_time, time[:index+1], control[:index+1]))
