@@ -1,12 +1,183 @@
 """Fit one permanent experimental step to a first-order model with delay."""
 
 import csv
+import copy
 import json
 from pathlib import Path
 
 import numpy as np
 
 from .background_tasks import check_cancelled
+
+
+def validate_experiment_origin(origin):
+    if origin is None:
+        return None
+    if not isinstance(origin, dict) or not isinstance(origin.get("experiment_id"), str) or not isinstance(origin.get("source"), str):
+        raise ValueError("Эксперимент: некорректное происхождение параметров.")
+    for key in ("data_revision", "result_revision"):
+        value = origin.get(key)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError("Эксперимент: некорректная версия параметров.")
+    from .experiment_control import model_parameters
+    model_parameters(origin.get("parameters", {}))
+    if not isinstance(origin.get("metadata"), dict) or any(not isinstance(v, str) for v in origin["metadata"].values()):
+        raise ValueError("Эксперимент: некорректные сведения о параметрах.")
+    return copy.deepcopy(origin)
+
+
+def format_experiment_origin(origin):
+    if origin is None:
+        return ""
+    p = origin["parameters"]
+    return (f"Источник T/L: {origin['source']}; версия идентификации {origin['result_revision']}; "
+            f"K={p['gain']:.6g}, T={p['time_constant']:.6g} с, L={p['delay']:.6g} с. "
+            "В балансе абсорбера использованы только T/L; его усиление сохранено.")
+
+
+def validate_experiment_state(state):
+    """Validate a portable page snapshot, including the last successful fit."""
+    if state is None:
+        return None
+    if not isinstance(state, dict):
+        raise ValueError("Эксперимент должен быть объектом JSON.")
+    state = copy.deepcopy(state)
+    headers, rows = state.get("headers"), state.get("rows")
+    if (not isinstance(headers, list) or any(not isinstance(h, str) or not h.strip() for h in headers)
+            or len(set(headers)) != len(headers) or (headers and len(headers) < 3)):
+        raise ValueError("Эксперимент: нужны разные непустые заголовки.")
+    if (not isinstance(rows, list) or len(rows) > 200000 or any(
+            not isinstance(row, list) or len(row) != len(headers)
+            or any(not isinstance(value, str) for value in row) for row in rows)):
+        raise ValueError("Эксперимент: некорректные строки или больше 200000 строк.")
+    columns, units = state.get("columns"), state.get("units")
+    if (not isinstance(columns, list) or len(columns) != 3 or any(
+            not isinstance(c, str) or (c and c not in headers) for c in columns)):
+        raise ValueError("Эксперимент: некорректный выбор столбцов.")
+    if (not isinstance(units, list) or len(units) != 3 or units[0] not in ("с", "мин")
+            or any(u not in ("как в\u00a0файле", "%") for u in units[1:])):
+        raise ValueError("Эксперимент: неизвестные единицы.")
+    if (not isinstance(state.get("source"), str) or state.get("delimiter") not in (";", ",", "табуляция")
+            or state.get("view") not in ("Отклик", "Остаток", "Проверка", "Регулирование")
+            or not isinstance(state.get("result_current"), bool)):
+        raise ValueError("Эксперимент: некорректные настройки страницы.")
+    result = state.get("result")
+    if result is not None:
+        if not isinstance(result, dict):
+            raise ValueError("Эксперимент: некорректный результат идентификации.")
+        arrays = []
+        for key in ("time", "input", "output", "model", "residual"):
+            try:
+                a = np.asarray(result.get(key), dtype=float)
+            except (TypeError, ValueError) as error:
+                raise ValueError("Эксперимент: сигналы должны быть числовыми.") from error
+            if a.ndim != 1 or not 17 <= a.size <= 200000 or not np.isfinite(a).all():
+                raise ValueError("Эксперимент: нужны конечные сигналы длиной 17–200000.")
+            arrays.append(a)
+            result[key] = a.tolist()
+        if len({a.size for a in arrays}) != 1 or np.any(np.diff(arrays[0]) <= 0):
+            raise ValueError("Эксперимент: длины сигналов или порядок времени нарушены.")
+        for key in ("gain", "time_constant", "delay", "baseline", "step_time", "amplitude", "rmse", "normalized_rmse"):
+            value = result.get(key)
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not np.isfinite(value):
+                raise ValueError(f"Эксперимент: некорректный параметр {key}.")
+        if (result["time_constant"] <= 0 or result["delay"] < 0 or result["rmse"] < 0
+                or result["normalized_rmse"] < 0 or result["gain"] == 0 or result["amplitude"] == 0):
+            raise ValueError("Эксперимент: параметры модели вне допустимых границ.")
+        interval = result.get("step_interval")
+        if (not isinstance(interval, list) or len(interval) != 2
+                or any(isinstance(v, bool) or not isinstance(v, (int, float)) or not np.isfinite(v) for v in interval)
+                or not arrays[0][0] <= interval[0] <= interval[1] == result["step_time"] <= arrays[0][-1]):
+            raise ValueError("Эксперимент: некорректный интервал ступени.")
+        if (not isinstance(result.get("source"), str) or not isinstance(result.get("method"), str)
+                or any(not isinstance(result.get(key), (list, tuple)) or len(result[key]) != 3
+                       or any(not isinstance(v, str) for v in result[key]) for key in ("columns", "units"))
+                or result["units"][0] not in ("с", "мин")
+                or any(v.replace("\u00a0", " ") not in ("как в файле", "%") for v in result["units"][1:])):
+            raise ValueError("Эксперимент: отсутствуют сведения о результате.")
+        result["columns"] = list(result["columns"])
+        result["units"] = list(result["units"])
+        validate_experiment_origin(result.get("origin"))
+        if not np.allclose(arrays[2] - arrays[3], arrays[4], rtol=1e-12, atol=1e-12):
+            raise ValueError("Эксперимент: остаток не соответствует данным.")
+    elif state["result_current"]:
+        raise ValueError("Эксперимент: нет актуального результата.")
+    for key in ("data_revision", "result_revision"):
+        value = state.get(key, 0)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError("Эксперимент: некорректная версия данных.")
+    if not isinstance(state.get("experiment_id", ""), str):
+        raise ValueError("Эксперимент: некорректный идентификатор.")
+    for key in ("metadata", "pi_settings"):
+        value = state.get(key, {})
+        if not isinstance(value, dict) or any(not isinstance(v, str) for v in value.values()):
+            raise ValueError("Эксперимент: сведения и черновые настройки должны быть текстом.")
+    for key in ("validation", "pi_result", "applied_origin"):
+        if state.get(key) is not None and not isinstance(state[key], dict):
+            raise ValueError("Эксперимент: некорректный снимок проверки.")
+    validate_experiment_origin(state.get("applied_origin"))
+    for key in ("validation", "pi_result"):
+        record = state.get(key)
+        if record is None:
+            continue
+        validate_experiment_origin(record.get("origin"))
+        if record.get("origin") is None:
+            raise ValueError("Эксперимент: проверка должна содержать происхождение параметров.")
+        if key == "validation":
+            required = ("time", "input", "output", "model", "residual")
+            records = [record]
+            from .experiment_control import model_parameters
+            model_parameters(record)
+            for name in ("source", "warning", "method"):
+                if not isinstance(record.get(name), str):
+                    raise ValueError("Эксперимент: отсутствуют сведения о проверке.")
+            for name in ("rmse", "normalized_rmse"):
+                value = record.get(name)
+                if isinstance(value, bool) or not isinstance(value, (int, float)) or not np.isfinite(value) or value < 0:
+                    raise ValueError("Эксперимент: некорректная ошибка проверки.")
+        else:
+            required = ("time", "output", "error", "control")
+            records = record.get("runs")
+            if not isinstance(records, list) or len(records) != 2:
+                raise ValueError("Эксперимент: нужны два опыта проверки PI.")
+            for name in ("eta0", "baseline", "setpoint", "horizon"):
+                value = record.get(name)
+                if isinstance(value, bool) or not isinstance(value, (int, float)) or not np.isfinite(value):
+                    raise ValueError("Эксперимент: некорректные параметры проверки PI.")
+            from .experiment_control import model_parameters
+            model_parameters(record.get("model", {}))
+        for run in records:
+            if not isinstance(run, dict):
+                raise ValueError("Эксперимент: некорректный опыт проверки.")
+            try:
+                arrays = [np.asarray(run.get(name), dtype=float) for name in required]
+            except (TypeError, ValueError) as error:
+                raise ValueError("Эксперимент: некорректные сигналы проверки.") from error
+            if (any(a.ndim != 1 or not 2 <= a.size <= 200002 or not np.isfinite(a).all() for a in arrays)
+                    or len({a.size for a in arrays}) != 1 or np.any(np.diff(arrays[0]) <= 0)):
+                raise ValueError("Эксперимент: нарушены сигналы проверки.")
+            if key == "pi_result":
+                if (not isinstance(run.get("name"), str) or not isinstance(run.get("metrics"), dict)
+                        or any(name not in run["metrics"] for name in ("final_error", "iae", "overshoot_percent", "settling_time", "reachable", "saturation_duration"))
+                        or any(name not in run for name in ("gain", "integral_time"))
+                        or np.any((arrays[3] < 0) | (arrays[3] > 1))):
+                    raise ValueError("Эксперимент: некорректный результат PI.")
+                for name, value in {**{name: run[name] for name in ("gain", "integral_time")}, **run["metrics"]}.items():
+                    if name in ("reachable", "output_out_of_range"):
+                        if not isinstance(value, bool):
+                            raise ValueError("Эксперимент: некорректный признак проверки PI.")
+                    elif name == "settling_time" and value is None:
+                        continue
+                    elif isinstance(value, bool) or not isinstance(value, (int, float)) or not np.isfinite(value):
+                        raise ValueError("Эксперимент: показатели проверки PI должны быть конечными числами.")
+                if (run["gain"] < 0 or run["integral_time"] <= 0 or any(run["metrics"][name] < 0 for name in
+                        ("iae", "overshoot_percent", "saturation_duration"))):
+                    raise ValueError("Эксперимент: показатели проверки PI вне допустимых границ.")
+        if key == "pi_result" and (record.get("input_role") != "η, доля" or record.get("output_role") not in ("Xог, доля", "Xна, доля")):
+            raise ValueError("Эксперимент: неизвестное назначение сигналов PI.")
+    if not isinstance(state.get("same_signals", False), bool):
+        raise ValueError("Эксперимент: подтверждение сигналов должно быть логическим.")
+    return state
 
 
 def read_experiment(path, delimiter=";"):

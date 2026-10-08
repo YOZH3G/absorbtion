@@ -15,6 +15,111 @@ from ui.scenario_editor import ScenarioEditorDialog
 
 
 class GuiStateTests(unittest.TestCase):
+    def test_complete_experiment_workflow_restores_snapshots_and_exports_reports(self):
+        import csv
+        import json
+        import numpy as np
+        from app.exporting import write_experiment_report, write_experiment_csv
+        app, page = self.app, self.app.identification_page
+        page.load_path(Path(main.__file__).parent / "data" / "identification_step.csv")
+        page.metadata["input_role"].set("η, доля")
+        page.metadata["output_role"].set("Xна, доля")
+        page.metadata["prediction"].set("Выход вырастет; K около 0.4")
+        page.calculate()
+        self.wait_for_task()
+        fit = copy.deepcopy(page.result)
+        time_values = np.linspace(0, 120, 601)
+        u = np.where(time_values < 15, .2, .7)
+        y = .3 + fit["gain"]*.5*-np.expm1(-np.maximum(time_values-15-fit["delay"],0)/fit["time_constant"])
+        path = Path(self.directory.name) / "independent.csv"
+        with path.open("w", newline="", encoding="utf-8") as stream:
+            writer = csv.writer(stream, delimiter=";")
+            writer.writerow(page.headers)
+            writer.writerows(zip(time_values,u,y))
+        page.same_signals.set(True)
+        with patch("ui.identification_page.filedialog.askopenfilename", return_value=str(path)):
+            page.validate_file()
+        self.wait_for_task()
+        self.assertLess(page.validation["rmse"], 1e-12)
+        page.pi_settings["horizon"].set("160")
+        page.check_pi()
+        self.wait_for_task()
+        self.assertIsNotNone(page.pi_result)
+        self.assertEqual(page.view.get(), "Регулирование")
+        app._show_page("identification")
+        snapshot = page.capture()
+        app._save_autosave()
+        path.unlink()
+        page.restore(None)
+        app._restore_autosave()
+        self.assertEqual(page.capture(), snapshot)
+        for fmt in ("html", "pdf"):
+            output = Path(self.directory.name)/f"experiment.{fmt}"
+            write_experiment_report(output, page.capture(), fmt)
+            self.assertGreater(output.stat().st_size, 1000)
+        write_experiment_csv(Path(self.directory.name)/"all.csv", snapshot)
+        before = json.dumps(page.pi_result, sort_keys=True)
+        page.units[0].set("мин")
+        self.assertFalse(page.result_current)
+        self.assertIn("прежних", app.response_subtitle.get())
+        self.assertEqual(json.dumps(page.pi_result, sort_keys=True), before)
+        broken = copy.deepcopy(snapshot)
+        broken["pi_result"]["runs"][0]["metrics"]["final_error"] = "broken"
+        from app.identification import validate_experiment_state
+        with self.assertRaises(ValueError):
+            validate_experiment_state(broken)
+
+    def test_experiment_session_restores_without_source_and_old_sessions_clear_it(self):
+        import json
+        import numpy as np
+        app, page = self.app, self.app.identification_page
+        source = Path(self.directory.name) / "source.csv"
+        source.write_bytes((Path(main.__file__).parent / "data" / "identification_step.csv").read_bytes())
+        page.load_path(source)
+        app._show_page("identification")
+        page.calculate()
+        self.wait_for_task()
+        original = page.result["model"].copy()
+        page.view.set("Остаток")
+        app._save_autosave()
+        self.assertTrue(app.autosave_path.exists())
+        source.unlink()
+        page.restore(None)
+        app._restore_autosave()
+        self.assertEqual(app.current_page, "identification")
+        self.assertEqual(page.view.get(), "Остаток")
+        self.assertTrue(page.result_current)
+        np.testing.assert_array_equal(page.result["model"], original)
+        page.columns[0].set(page.columns[1].get())
+        app._save_autosave()
+        page.restore(None)
+        app._restore_autosave()
+        self.assertFalse(page.result_current)
+        self.assertEqual(str(page.apply_button["state"]), "disabled")
+        np.testing.assert_array_equal(page.result["model"], original)
+        old = json.loads(app.autosave_path.read_text(encoding="utf-8"))
+        del old["laboratory"]["identification"]
+        old["laboratory"]["page"] = "disturbances"
+        app.autosave_path.write_text(json.dumps(old), encoding="utf-8")
+        app._restore_autosave()
+        self.assertIsNone(page.result)
+        self.assertEqual(page.rows, [])
+
+    def test_corrupt_experiment_session_does_not_replace_the_successful_fit(self):
+        import json
+        app, page = self.app, self.app.identification_page
+        page.load_path(Path(main.__file__).parent / "data" / "identification_step.csv")
+        page.calculate()
+        self.wait_for_task()
+        original = page.result
+        laboratory = app._capture_laboratory()
+        laboratory["identification"]["result"]["time"][1] = 0
+        path = Path(self.directory.name) / "bad-experiment.json"
+        path.write_text(json.dumps(dict(version=2, comparison_counter=0, runs=[], laboratory=laboratory)), encoding="utf-8")
+        with self.assertRaises(ValueError):
+            read_laboratory_session(path)
+        self.assertIs(page.result, original)
+
     def test_foreign_scenario_and_optional_prediction_restore_without_replacing_signal(self):
         import json
         import numpy as np

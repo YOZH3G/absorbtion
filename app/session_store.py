@@ -13,6 +13,7 @@ from .scenario_store import DISTURBANCE_TYPES, normalize_scenario
 from .laboratory import CORRECTION_OPTIONS, DIRECTION_OPTIONS, FASTEST_OPTIONS, normalize_lesson
 from .controller_extensions import EXTENSION_DEFAULTS, extensions_from_form
 from .validation import parse_disturbance, parse_nonnegative_number, parse_percentage, parse_positive_number
+from .identification import validate_experiment_state, validate_experiment_origin
 
 
 FORMAT_VERSION = 2
@@ -103,6 +104,7 @@ def _deserialize_run(run):
     if run["chain"] not in ("lean_gas", "rich_absorbent") or run["controller_type"] not in ("—", "P", "PI", "PID", "PD"):
         raise ValueError("Опыт: неизвестная цепь или тип регулятора.")
     restored = copy.deepcopy(run)
+    restored["experiment_origin"] = validate_experiment_origin(run.get("experiment_origin"))
     restored["model_values"] = values
     restored["time"] = _deserialize_signal(run.get("time"), "time")
     restored["response"] = _deserialize_signal(run.get("response"), "response")
@@ -201,6 +203,7 @@ def validate_laboratory(laboratory):
     if not isinstance(laboratory, dict):
         raise ValueError("Лабораторная должна быть объектом JSON.")
     restored = copy.deepcopy(laboratory)
+    restored["identification"] = validate_experiment_state(restored.get("identification"))
     validate_input_state(restored.get("input_state"), draft=True)
     restored["scenario"] = normalize_scenario(restored.get("scenario"))
     restored["lesson"] = normalize_lesson(restored.get("lesson"))
@@ -224,7 +227,7 @@ def validate_laboratory(laboratory):
             not isinstance(value, str) for value in restored["selected_runs"]):
         raise ValueError("Лабораторная: выбранные опыты должны быть списком идентификаторов.")
     if restored["page"] not in ("disturbances", "dynamics", "results", "comparison", "controller",
-                                "sensitivity", "tuning_map", "scenarios", "export"):
+                                "sensitivity", "tuning_map", "scenarios", "export", "identification"):
         raise ValueError("Лабораторная: неизвестный раздел.")
     draft = restored.get("prediction_fields")
     if not isinstance(draft, dict):
@@ -241,6 +244,7 @@ def validate_laboratory(laboratory):
         if not isinstance(calculation, dict) or not isinstance(calculation.get("title"), str):
             raise ValueError("Лабораторная: некорректный снимок расчёта.")
         validate_input_state(calculation.get("input_state"))
+        validate_experiment_origin(calculation.get("experiment_origin"))
         calculation["lesson"] = normalize_lesson(calculation.get("lesson"))
         calculation["evaluation"] = _validate_evaluation(calculation.get("evaluation"))
         prediction = calculation.get("prediction")
@@ -255,7 +259,7 @@ def validate_laboratory(laboratory):
             if not 0 <= value <= 1:
                 raise ValueError("Расчёт: прогноз концентрации должен быть в диапазоне 0–1.")
         restored["last_calculation"] = {key: copy.deepcopy(calculation.get(key))
-                                        for key in ("input_state", "title", "lesson", "prediction", "evaluation")}
+                                        for key in ("input_state", "title", "lesson", "prediction", "evaluation", "experiment_origin")}
     return restored
 
 
@@ -314,7 +318,7 @@ def restore_calculation(snapshot):
     result = run_simulation(scenario["chain"], scenario["model_values"], scenario["component"] or 0,
                             scenario["flow"] or 0, dynamics, controller)
     result.update({key: copy.deepcopy(snapshot.get(key))
-                   for key in ("input_state", "title", "lesson", "prediction", "evaluation")})
+                   for key in ("input_state", "title", "lesson", "prediction", "evaluation", "experiment_origin")})
     result["disturbance_type"] = scenario["disturbance_type"]
     return result
 

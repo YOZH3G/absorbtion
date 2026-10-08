@@ -14,6 +14,113 @@ from .simulation import LEAN_GAS
 from .plotting import adaptive_legend
 
 
+def write_experiment_report(path, state, format_name):
+    """Export fit, independent validation and controller snapshots together."""
+    from .identification import validate_experiment_state
+    state = validate_experiment_state(state)
+    fit = state["result"]
+    if fit is None:
+        raise ValueError("Нет результата идентификации для протокола.")
+    metadata = state.get("metadata", {})
+    labels = dict(title="Название", description="Источник", input_role="Вход", output_role="Выход", regime="Рабочий режим",
+                  comment="Комментарий", prediction="Прогноз", explanation="Объяснение остатка", conclusion="Вывод")
+    sections = [("Эксперимент", [f"{labels.get(key, key)}: {value}" for key, value in metadata.items()]),
+                ("Исходные данные", [f"Источник: {fit['source']}", f"Столбцы: {fit['columns']}",
+                    f"Единицы: {fit['units']}", f"Версия данных подгонки: {fit.get('origin', {}).get('data_revision', 0)}",
+                    "Результат актуален." if state["result_current"] else "Результат относится к прежнему выбору данных."]),
+                ("Подгонка", [f"K={fit['gain']:.8g}; T={fit['time_constant']:.8g} с; L={fit['delay']:.8g} с",
+                    f"RMSE={fit['rmse']:.8g}; относительная ошибка={fit['normalized_rmse']*100:.6g}%",
+                    "Подгонка к одной ступени не подтверждает модель за пределами исходного режима."])]
+    figures = []
+    figure = Figure(figsize=(9, 8), constrained_layout=True)
+    axes = figure.subplots(3, 1)
+    for axis, label in zip(axes, ("Вход, приведённые единицы", "Выход, приведённые единицы", "Остаток")):
+        axis.set_ylabel(label)
+    axes[0].plot(fit["time"], fit["input"], label="Вход")
+    axes[1].plot(fit["time"], fit["output"], label="Эксперимент")
+    axes[1].plot(fit["time"], fit["model"], label="Подгонка")
+    axes[2].plot(fit["time"], fit["residual"], label="Остаток")
+    figures.append(figure)
+    validation = state.get("validation")
+    if validation is None:
+        sections.append(("Независимая проверка", ["Оценена только подгонка к исходной записи."]))
+    else:
+        sections.append(("Независимая проверка", [f"Источник: {validation['source']}",
+            f"K={validation['gain']:.8g}; T={validation['time_constant']:.8g}; L={validation['delay']:.8g}",
+            f"RMSE={validation['rmse']:.8g}; ошибка={validation['normalized_rmse']*100:.6g}%",
+            f"Версия идентификации: {validation['origin']['result_revision']}", validation["warning"],
+            "Параметры зафиксированы до загрузки проверочной записи."]))
+        figure = Figure(figsize=(9, 8), constrained_layout=True)
+        axes = figure.subplots(3, 1)
+        for axis, label in zip(axes, ("Вход, приведённые единицы", "Выход, приведённые единицы", "Остаток")):
+            axis.set_ylabel(label)
+        axes[0].plot(validation["time"], validation["input"], label="Проверочный вход")
+        axes[1].plot(validation["time"], validation["output"], label="Проверочный эксперимент")
+        axes[1].plot(validation["time"], validation["model"], label="Фиксированная модель")
+        axes[2].plot(validation["time"], validation["residual"], label="Остаток проверки")
+        figures.append(figure)
+    control = state.get("pi_result")
+    if control is not None:
+        p = control["model"]
+        lines = [f"Модель: K={p['gain']:.8g}; T={p['time_constant']:.8g} с; L={p['delay']:.8g} с", f"Исходная η={control['eta0']:.8g}; задание={control['setpoint']:.8g}",
+                 f"Назначение сигналов: {control['input_role']} → {control['output_role']}",
+                 f"Версия идентификации: {control['origin']['result_revision']}",
+                 "Проверка выполнена в симуляции, оборудование не подключалось."]
+        figure = Figure(figsize=(9, 8), constrained_layout=True)
+        axes = figure.subplots(3, 1)
+        for axis, label in zip(axes, (control["output_role"], "Ошибка, доля", "η, доля")):
+            axis.set_ylabel(label)
+        for run in control["runs"]:
+            m = run["metrics"]
+            lines.append(f"{run['name']}: Kp={run['gain']:.8g}; Ti={run['integral_time']:.8g}; "
+                         f"ошибка={m['final_error']:.8g}; IAE={m['iae']:.8g}; перерегулирование={m['overshoot_percent']:.6g}%; "
+                         f"установление={_format_optional_number(m['settling_time'])} с; насыщение={m['saturation_duration']:.6g} с; "
+                         f"задание {'достижимо' if m['reachable'] else 'недостижимо'}")
+            if m.get("output_out_of_range"):
+                lines.append("Выход модели вне диапазона 0…1: требуется проверить её применимость.")
+            for axis, key in zip(axes, ("output", "error", "control")):
+                axis.plot(run["time"], run[key], label=run["name"])
+        axes[0].axhline(control["setpoint"], color="gray", linestyle="--", label="Задание")
+        sections.append(("PI-регулирование", lines))
+        figures.append(figure)
+    for figure in figures:
+        for axis in figure.axes:
+            axis.set_xlabel("Время, с")
+            axis.legend()
+            axis.grid(alpha=.2)
+    for key in ("validation", "pi_result"):
+        record = state.get(key)
+        if record is not None and (record["origin"]["data_revision"] != state.get("data_revision", 0)
+                or record["origin"]["result_revision"] != state.get("result_revision", 0)):
+            sections.append(("Снимок прежнего опыта", [f"{key}: исходные данные или идентификация изменились. Показаны сохранённые результаты."]))
+    title = metadata.get("title") or "Эксперимент и проверка регулятора"
+    if format_name == "pdf":
+        return _write_pdf(path, [*_text_pages(title, [(name, "\n".join(lines)) for name, lines in sections]), *figures])
+    if format_name != "html":
+        raise ValueError("Поддерживаются HTML и PDF.")
+    markup = "".join(f"<h2>{html.escape(name)}</h2><ul>" + "".join(f"<li>{html.escape(line)}</li>" for line in lines) + "</ul>" for name, lines in sections)
+    document = f'<!doctype html><html lang="ru"><meta charset="utf-8"><title>{html.escape(title)}</title><style>body{{font:16px sans-serif;max-width:1000px;margin:32px auto}}img{{max-width:100%}}</style><h1>{html.escape(title)}</h1>{markup}'
+    document += _figures_markup(figures, "Результаты экспериментальной работы") + "</html>"
+    Path(path).write_text(document, encoding="utf-8")
+    return Path(path)
+
+
+def write_experiment_csv(path, state):
+    from .identification import validate_experiment_state
+    state = validate_experiment_state(state)
+    with Path(path).open("w", encoding="utf-8-sig", newline="") as stream:
+        writer = csv.writer(stream, delimiter=";")
+        writer.writerow(("Этап", "Время, с", "Вход", "Эксперимент", "Модель", "Остаток или ошибка", "Управление η"))
+        for key, name in (("result", "Подгонка"), ("validation", "Независимая проверка")):
+            record = state.get(key)
+            if record is not None:
+                writer.writerows((name, *values, "") for values in zip(*(record[k] for k in ("time", "input", "output", "model", "residual"))))
+        if state.get("pi_result") is not None:
+            for run in state["pi_result"]["runs"]:
+                writer.writerows((run["name"], t, "", "", y, e, u) for t, y, e, u in zip(*(run[k] for k in ("time", "output", "error", "control"))))
+    return Path(path)
+
+
 def save_graphs(signal_figure, response_figure, selected_path):
     base = Path(selected_path)
     stem = base.with_suffix("")
@@ -69,6 +176,9 @@ def build_protocol(result, title):
         ("Запаздывание L", f"{result['dynamics']['delay']:g} с"),
         ("Режим", result["result_mode"]),
     ]
+    from .identification import format_experiment_origin
+    if result.get("experiment_origin") is not None:
+        parameters.append(("Экспериментальная динамика", format_experiment_origin(result["experiment_origin"])))
     for key in ("gg", "ga", "xg", "xa", "eta"):
         value = result["model_values"][key]
         parameters.append((key, f"{value:g} кг/ч" if key in ("gg", "ga") else f"{value * 100:.8g}%"))
@@ -340,6 +450,7 @@ def _prediction_text(prediction):
 
 
 def _comparison_text(runs):
+    from .identification import format_experiment_origin
     if not runs:
         return "Закреплённые опыты отсутствуют."
     return "\n".join(
@@ -352,7 +463,8 @@ def _comparison_text(runs):
         f"ошибка: теория {_scaled_metric(run.get('static_error'), ' п.п.')}, "
         f"конец {_scaled_metric(run.get('final_error'), ' п.п.')}; "
         f"IAE {_scaled_metric(run.get('iae'), ' п.п.·с')}; "
-        f"насыщение η {_scaled_metric(run.get('saturation_duration'), ' с', 1)}."
+        f"насыщение η {_scaled_metric(run.get('saturation_duration'), ' с', 1)}.\n"
+        + format_experiment_origin(run.get("experiment_origin"))
         for run in runs
     )
 

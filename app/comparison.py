@@ -37,6 +37,7 @@ def build_comparison_run(result, name, input_state=None):
         "settling_status": metrics.get("settling_status", "Установление не подтверждено"),
         "iae": metrics.get("iae"),
         "saturation_duration": metrics.get("saturation_duration"),
+        "experiment_origin": copy.deepcopy(result.get("experiment_origin")),
     }
     if input_state is not None:
         run["input_state"] = copy.deepcopy(input_state)

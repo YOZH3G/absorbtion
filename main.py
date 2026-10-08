@@ -12,7 +12,7 @@ from matplotlib.colors import ListedColormap
 from matplotlib.figure import Figure
 
 APP_NAME = "Анализ процесса абсорбции"
-APP_VERSION = "1.5.4"
+APP_VERSION = "1.6.0"
 
 from app.calculations import (
     CONTROLLER_TYPES,
@@ -2387,6 +2387,7 @@ class AbsorptionApp(ttk.Frame):
             return
         try:
             self._restore_input_state(input_state)
+            self.identification_page.applied_origin = copy.deepcopy(run.get("experiment_origin"))
         except (KeyError, TypeError, ValueError) as error:
             self._set_status(f"Не удалось вернуть параметры: {error}", error=True)
             return
@@ -2458,6 +2459,8 @@ class AbsorptionApp(ttk.Frame):
             key: copy.deepcopy(calculation[key])
             for key in ("input_state", "title", "lesson", "prediction", "evaluation")
         }
+        if snapshot is not None:
+            snapshot["experiment_origin"] = copy.deepcopy(calculation.get("experiment_origin"))
         return {
             "input_state": self._capture_input_state(), "scenario": copy.deepcopy(self.applied_scenario),
             "lesson": copy.deepcopy(self.current_lesson), "scenario_name": self.selected_scenario.get(),
@@ -2471,6 +2474,7 @@ class AbsorptionApp(ttk.Frame):
             "evaluation": copy.deepcopy(self.assignment_evaluation), "student_name": self.student_name.get(),
             "conclusion": self.student_conclusion.get(), "page": self.current_page,
             "selected_runs": list(self.comparison_table.selection()), "last_calculation": snapshot,
+            "identification": self.identification_page.capture(),
         }
 
     def _restore_laboratory(self, laboratory, result):
@@ -2529,6 +2533,7 @@ class AbsorptionApp(ttk.Frame):
                                          + "\n".join(evaluation["lines"])
                                          + f"\nОсталось попыток: {self.current_lesson['attempt_limit'] - self.assignment_attempts}.")
         self._refresh_comparison_table(laboratory["selected_runs"])
+        self.identification_page.restore(laboratory.get("identification"))
         self._show_page(laboratory["page"])
         self._mark_result_stale()
         self.calculate_button_text.set("Проверить прогноз" if self.assignment_enabled.get()
@@ -2715,11 +2720,13 @@ class AbsorptionApp(ttk.Frame):
         runs = self._selected_comparison_runs()
         def metric(value, unit, scale=100):
             return "не применимо" if value is None else self._format_number(value * scale) + unit
+        from app.identification import format_experiment_origin
         self.comparison_details.set("\n\n".join(
             f"{run['name']}: {run.get('settling_status', 'нет данных')}.\n"
             f"Теория {metric(run.get('steady_state'), '%')}; конец {metric(run.get('final_value'), '%')}.\n"
             f"Ошибка: теория {metric(run['static_error'], ' п.п.')}; конец {metric(run.get('final_error'), ' п.п.')}.\n"
-            f"IAE {metric(run.get('iae'), ' п.п.·с')}; насыщение η {metric(run.get('saturation_duration'), ' с', 1)}."
+            f"IAE {metric(run.get('iae'), ' п.п.·с')}; насыщение η {metric(run.get('saturation_duration'), ' с', 1)}.\n"
+            + format_experiment_origin(run.get("experiment_origin"))
             for run in runs))
         self._remove_controller_axis()
         self.primary_chart_title.set("Сравнение переходных процессов")
@@ -3255,7 +3262,8 @@ class AbsorptionApp(ttk.Frame):
 
         state = self._capture_input_state()
         metadata = {"disturbance_type": self.disturbance_type.get(), "input_state": state,
-                    "title": self._active_scenario_title(), "lesson": copy.deepcopy(self.current_lesson)}
+                    "title": self._active_scenario_title(), "lesson": copy.deepcopy(self.current_lesson),
+                    "experiment_origin": self.identification_page.active_origin()}
         self._start_task("Расчёт опыта", lambda cancel, progress: run_simulation(
             state["chain"], state["model_values"], component_fraction, flow_fraction,
             dynamics, controller, cancel=cancel, progress=progress),
@@ -3972,6 +3980,9 @@ def _run_release_check(output_path):
                     raise RuntimeError(app.status_text.get())
             report["builtin_scenarios"] = len(app.scenarios)
             app.identification_page.load_path(Path(__file__).resolve().parent / "data" / "identification_step.csv")
+            app.identification_page.metadata["input_role"].set("η, доля")
+            app.identification_page.metadata["output_role"].set("Xна, доля")
+            app.identification_page.metadata["conclusion"].set("Проверка экспериментального цикла")
             app.identification_page.calculate()
             deadline = time.monotonic() + 30
             while app._task is not None:
@@ -3983,6 +3994,25 @@ def _run_release_check(output_path):
             if fitted is None or abs(fitted["time_constant"] - 8) > .08 or abs(fitted["delay"] - 2) > .2:
                 raise RuntimeError("Учебный CSV не восстановил эталонную динамику.")
             report["identification_verified"] = True
+            page = app.identification_page
+            page.check_pi()
+            deadline = time.monotonic() + 30
+            while app._task is not None:
+                if time.monotonic() >= deadline:
+                    raise RuntimeError("Превышено время проверки PI.")
+                root.update()
+                time.sleep(.01)
+            if page.pi_result is None:
+                raise RuntimeError(page.summary.get())
+            from app.experiment_control import validate_step
+            validation_time = np.linspace(0, 120, 601)
+            validation_input = np.where(validation_time < 15, .2, .7)
+            validation_output = .3 + fitted["gain"]*.5*-np.expm1(-np.maximum(validation_time-15-fitted["delay"], 0)/fitted["time_constant"])
+            page.accept_validation(dict(validate_step(validation_time, validation_input, validation_output, fitted),
+                                        source="release-validation.csv", origin=page.origin()))
+            from app.exporting import write_experiment_report
+            write_experiment_report(Path(directory)/"experiment.html", page.capture(), "html")
+            expected_experiment = page.capture()
             expected = app.last_calculation["final_response"].copy()
             app.student_conclusion.set("Проверка восстановления релиза")
             app._save_autosave()
@@ -3997,6 +4027,9 @@ def _run_release_check(output_path):
                     or not np.array_equal(expected, app.last_calculation["final_response"])
                     or app.student_conclusion.get() != "Проверка восстановления релиза"):
                 raise RuntimeError("Не удалось точно восстановить расчёт и пользовательские данные.")
+            if app.identification_page.capture() != expected_experiment:
+                raise RuntimeError("Эксперимент и проверка PI восстановлены неточно.")
+            report["experiment_workflow_verified"] = True
             app._close_application()
             root = None
             report.update(status="passed", gui_started=True, autosave_restored=True)
