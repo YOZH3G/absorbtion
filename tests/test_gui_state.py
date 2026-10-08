@@ -15,6 +15,130 @@ from ui.scenario_editor import ScenarioEditorDialog
 
 
 class GuiStateTests(unittest.TestCase):
+    def test_common_model_results_restore_and_reject_corrupt_snapshot(self):
+        import numpy as np
+        from app.physical_models import MODELS
+        from app.session_store import validate_laboratory
+        from unittest.mock import patch
+        import copy
+        self.app._calculate()
+        self.wait_for_task()
+        expected = copy.deepcopy(self.app.model_results["absorber"])
+        self.app._show_page("model_result")
+        self.app._set_chart_mode("both")
+        self.root.update_idletasks()
+        self.assertEqual(len(self.app.chart_panes.panes()), 2)
+        self.assertTrue(self.app.disturbance_axis.lines)
+        self.assertTrue(self.app.response_axis.lines)
+        np.testing.assert_array_equal(self.app.response_axis.lines[0].get_ydata(),
+                                      np.asarray(expected["signals"]["xog"])*100)
+        saved = self.app._capture_laboratory()
+        validated = validate_laboratory(saved)
+        self.app.model_results.clear()
+        self.app._restore_laboratory(validated, self.app.last_calculation)
+        self.assertEqual(self.app.model_results["absorber"], expected)
+        self.assertEqual(self.app.current_page, "model_result")
+        old = copy.deepcopy(saved)
+        old.pop("model_results")
+        old["page"] = "disturbances"
+        old.pop("selected_model")
+        old = validate_laboratory(old)
+        self.app._restore_laboratory(old, self.app.last_calculation)
+        self.assertEqual(self.app.model_results["absorber"], expected)
+        damaged = copy.deepcopy(saved)
+        damaged["model_results"]["absorber"]["units"]["xog"] = "м"
+        with self.assertRaises(ValueError):
+            validate_laboratory(damaged)
+        self.assertEqual(self.app.model_results["absorber"], expected)
+        self.app.selected_model.set("Бак")
+        self.app._select_model()
+        self.app.tank_page.calculate()
+        self.wait_for_task()
+        tank = copy.deepcopy(self.app.model_results["level_tank"])
+        self.app._show_page("model_result")
+        self.assertEqual(self.app.selected_model.get(), "Бак")
+        self.assertEqual(self.app.response_axis.get_ylabel(), "м")
+        for axis, canvas in ((self.app.disturbance_axis, self.app.disturbance_canvas),
+                             (self.app.response_axis, self.app.response_canvas)):
+            canvas.draw()
+            legend = axis.get_legend().get_window_extent(canvas.get_renderer())
+            self.assertLessEqual(legend.y1, axis.figure.bbox.y1 + 1)
+            self.assertGreaterEqual(legend.y0, axis.figure.bbox.y0 - 1)
+        np.testing.assert_array_equal(self.app.response_axis.lines[0].get_ydata(), tank["signals"]["level"])
+        self.app._set_chart_mode("response")
+        self.app._set_chart_mode("both")
+        self.root.update_idletasks()
+        self.assertEqual(len(self.app.chart_panes.panes()), 2)
+        with patch("ui.model_result_page.filedialog.askopenfilename", return_value="missing.json"):
+            self.app.model_result_page.open()
+        self.assertEqual(self.app.model_results["level_tank"], tank)
+        self.assertFalse(self.app.nav_buttons["controller"].winfo_manager())
+        self.app.nav_buttons["disturbances"].invoke()
+        self.assertEqual(self.app.current_page, "tank")
+        self.assertEqual(self.app.selected_model.get(), "Бак")
+
+    def test_valid_result_import_cancels_same_model_worker_and_invalid_import_preserves_it(self):
+        import threading
+        from app.physical_models import MODELS
+        from app.model_contract import write_result
+        from app.tank import DEFAULTS
+        self.app.selected_model.set("Бак")
+        self.app._select_model()
+        raw = MODELS.run("level_tank", {"parameters": dict(DEFAULTS, horizon=40.)})
+        imported = MODELS.result("level_tank", raw)
+        imported["configuration"]["marker"] = "imported"
+        path = Path(self.directory.name)/"imported.json"
+        write_result(path, imported, MODELS)
+        gate = threading.Event()
+        def late(cancel, progress):
+            gate.wait(3)
+            return dict(raw, revision=self.app.tank_page.revision)
+        self.app._start_task("Запоздалый расчёт", late, self.app.tank_page.accept_result, "tank")
+        task = self.app._task
+        try:
+            with patch("ui.model_result_page.filedialog.askopenfilename", return_value="missing.json"):
+                self.app.model_result_page.open()
+            self.assertIs(self.app._task, task)
+            self.assertFalse(task.cancel.is_set())
+            with patch("ui.model_result_page.filedialog.askopenfilename", return_value=str(path)):
+                self.app.model_result_page.open()
+            self.assertTrue(task.cancel.is_set())
+            self.assertIsNone(self.app._task)
+            gate.set()
+            task.thread.join(3)
+            self.root.update()
+            self.assertEqual(self.app.model_results["level_tank"], imported)
+        finally:
+            gate.set()
+            task.thread.join(3)
+
+    def test_test_only_model_uses_common_view_without_model_specific_branch(self):
+        import numpy as np
+        from app.model_contract import ModelRegistry
+        from app.physical_models import MODELS
+        from test_physical_models import heater
+        from unittest.mock import patch
+        registry = ModelRegistry((*MODELS.all(), heater()))
+        native = registry.run("test_heater", {"parameters": {"capacity": 4., "initial": 20.}})
+        result = registry.result("test_heater", native)
+        with patch.object(main, "MODELS", registry), patch("ui.model_result_page.MODELS", registry), patch("app.session_store.MODELS", registry):
+            self.app.model_results["test_heater"] = result
+            self.app.selected_model.set("Тестовый нагреватель")
+            self.app._select_model()
+            self.root.update_idletasks()
+            self.assertEqual(self.app.current_page, "model_result")
+            self.assertEqual(self.app.response_axis.get_ylabel(), "°C")
+            self.assertEqual(self.app.disturbance_axis.get_ylabel(), "Вт")
+            np.testing.assert_array_equal(self.app.response_axis.lines[0].get_ydata(), [20., 20.5, 21.])
+            saved = self.app._capture_laboratory()
+            from app.session_store import validate_laboratory
+            validated = validate_laboratory(saved)
+            self.app._restore_laboratory(validated, self.app.last_calculation)
+            self.assertEqual(self.app.selected_model.get(), "Тестовый нагреватель")
+            self.assertEqual(self.app.model_results["test_heater"], result)
+            self.app.selected_model.set("Абсорбер")
+            self.app._select_model()
+
     def test_tank_complete_workflow_roundtrip_units_and_atomic_import(self):
         import json
         import numpy as np

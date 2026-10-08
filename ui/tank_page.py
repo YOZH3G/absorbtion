@@ -8,7 +8,8 @@ from pathlib import Path
 
 import numpy as np
 
-from app.tank import DEFAULTS, MODEL_ID, MODEL_VERSION, equilibrium, simulate, compare_regimes, validate_inputs
+from app.tank import DEFAULTS, MODEL_ID, MODEL_VERSION, equilibrium, compare_regimes, validate_inputs
+from app.physical_models import MODELS, run_model
 from app.tank_state import FIELD_DEFAULTS, VIEWS, validate_tank_state
 from app.identification import identify_step, read_experiment
 from app.experiment_control import validate_step
@@ -122,9 +123,10 @@ class TankPage(ttk.Frame):
         try: p=self.inputs()
         except ValueError as error: self.fail(error); return
         revision=self.revision
-        self.perform("Отклик бака",lambda cancel,progress: dict(simulate(p,cancel=cancel,progress=progress),revision=revision),self.accept_result)
+        self.perform("Отклик бака",lambda cancel,progress: dict(run_model(MODEL_ID,dict(parameters=p),cancel=cancel,progress=progress),revision=revision),self.accept_result)
 
     def accept_result(self,result):
+        self.app.model_results[MODEL_ID] = MODELS.result(MODEL_ID,result)
         self.result=result; self.view.set("Свободный отклик")
         self.summary.set(f"Конечный уровень {result['level'][-1]:.6g} м. " + (f"Остановка: {EVENT_TEXT[result['event']['kind']]}, {result['event']['time']:.6g} с." if result['event'] else "Горизонт опыта завершён."))
         self.draw(); self.app._set_status("Расчёт бака выполнен")
@@ -159,7 +161,7 @@ class TankPage(ttk.Frame):
             for var,value in zip(self.units,("с","м³/с","м")): var.set(value)
             self.restoring=False
             self.summary.set(f"Снят эксперимент: {len(self.rows)} точек; σ={sigma:g} м; генератор={seed}. Теперь оцените K/T/L.")
-        self.perform("Эксперимент бака",lambda cancel,progress:dict(simulate(p,cancel=cancel,progress=progress),revision=revision),accept)
+        self.perform("Эксперимент бака",lambda cancel,progress:dict(run_model(MODEL_ID,dict(parameters=p),cancel=cancel,progress=progress),revision=revision),accept)
 
     def import_csv(self):
         path=filedialog.askopenfilename(title="Эксперимент бака",filetypes=(("CSV","*.csv"),))
@@ -229,6 +231,7 @@ class TankPage(ttk.Frame):
         fit=copy.deepcopy(self.fit); revision=self.revision
         configuration={k:self.fields[k].get() for k in ("gain","integral_time","setpoint")}
         def accept(result):
+            self.app.model_results[MODEL_ID] = MODELS.result(MODEL_ID,result["cases"][0])
             self.pi=result; self.view.set("PI")
             self.summary.set("\n".join(f"{r['name']}: IAE={r['metrics']['iae']:.5g} м·с; перерегулирование={r['metrics']['overshoot_percent']:.3g}%; "
                  f"установление={r['metrics']['settling_time'] if r['metrics']['settling_time'] is not None else 'не достигнуто'} с; насыщение={r['metrics']['saturation_duration']:.4g} с; {STATUS_TEXT[r['metrics']['status']]}." for r in result['cases']))

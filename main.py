@@ -12,7 +12,7 @@ from matplotlib.colors import ListedColormap
 from matplotlib.figure import Figure
 
 APP_NAME = "Лаборатория динамики и управления"
-APP_VERSION = "1.7.1"
+APP_VERSION = "1.8.0"
 
 from app.calculations import (
     CONTROLLER_TYPES,
@@ -53,12 +53,14 @@ from app.scenario_store import ScenarioStore
 from app.session_store import read_laboratory_session, restore_calculation, validate_input_state, write_session
 from app.settings_store import SettingsStore
 from app.plotting import adaptive_legend
-from app.simulation import LEAN_GAS, RICH_ABSORBENT, run_simulation, tune_balanced_controller
+from app.simulation import LEAN_GAS, RICH_ABSORBENT, tune_balanced_controller
 from app.controller_extensions import EXTENSION_DEFAULTS, EXTENSION_FIELDS, extensions_from_form
 from app.validation import parse_disturbance, parse_value_list, parse_nonnegative_number, parse_positive_number, parse_percentage
 from ui.model_dialog import ModelParametersDialog
 from ui.identification_page import IdentificationPage
 from ui.tank_page import TankPage
+from ui.model_result_page import ModelResultPage
+from app.physical_models import MODELS, run_model
 from ui.chart_tools import SharedTimeCursor
 from ui.scenario_editor import ScenarioEditorDialog
 from ui.window_geometry import fit_geometry, work_area
@@ -120,6 +122,7 @@ class DynamicsControlApp(ttk.Frame):
         self.scenarios = self.scenario_store.scenarios
         self.scenarios_by_name = {scenario["name"]: scenario for scenario in self.scenarios}
         self.pages = {}
+        self.model_results = {}
         self.nav_buttons = {}
 
         self.component_enabled = tk.BooleanVar(value=False)
@@ -322,11 +325,11 @@ class DynamicsControlApp(ttk.Frame):
         style.configure("Sidebar.TFrame", background=SIDEBAR)
         style.configure("SidebarTitle.TLabel", background=SIDEBAR, foreground="#FFFFFF", font=("Segoe UI", 14, "bold"))
         style.configure("SidebarMeta.TLabel", background=SIDEBAR, foreground=SIDEBAR_MUTED, font=("Segoe UI", 9))
-        style.configure("SidebarNav.TButton", background=SIDEBAR, foreground="#E5ECF5", borderwidth=0, padding=(18, 13), font=("Segoe UI", 10), anchor="w")
+        style.configure("SidebarNav.TButton", background=SIDEBAR, foreground="#E5ECF5", borderwidth=0, padding=(18, 9), font=("Segoe UI", 10), anchor="w")
         style.map("SidebarNav.TButton", background=[("active", "#193553")])
         style.configure("SidebarToggle.TButton", background=SIDEBAR, foreground="#E5ECF5", borderwidth=0, padding=(12, 10), font=("Segoe UI", 10), anchor="center")
         style.map("SidebarToggle.TButton", background=[("active", "#193553")])
-        style.configure("SelectedSidebarNav.TButton", background=ACCENT, foreground="#FFFFFF", borderwidth=0, padding=(18, 13), font=("Segoe UI", 10, "bold"), anchor="w")
+        style.configure("SelectedSidebarNav.TButton", background=ACCENT, foreground="#FFFFFF", borderwidth=0, padding=(18, 9), font=("Segoe UI", 10, "bold"), anchor="w")
         style.map("SelectedSidebarNav.TButton", background=[("active", ACCENT_ACTIVE)])
         style.configure("SectionHeader.TLabel", background=BACKGROUND, foreground=TEXT, font=("Segoe UI", 15, "bold"))
         style.configure("MetricTitle.TLabel", background=CARD_BACKGROUND, foreground=MUTED, font=("Segoe UI", 9))
@@ -360,7 +363,7 @@ class DynamicsControlApp(ttk.Frame):
                                        command=self._advance_learning_step, style="Toolbar.TButton")
         self.route_button.grid(row=0, column=1, sticky="e")
         self.selected_model = tk.StringVar(value="Абсорбер")
-        model_box = ttk.Combobox(topbar, textvariable=self.selected_model, values=("Абсорбер", "Бак"),
+        model_box = ttk.Combobox(topbar, textvariable=self.selected_model, values=tuple(model.name for model in MODELS.all()),
                                 state="readonly", width=12)
         model_box.grid(row=0, column=2, sticky="e", padx=(12, 0))
         model_box.bind("<<ComboboxSelected>>", self._select_model)
@@ -398,6 +401,7 @@ class DynamicsControlApp(ttk.Frame):
             ("dynamics", "Динамика"),
             ("controller", "Регулятор"),
             ("results", "Результаты"),
+            ("model_result", "Результат модели"),
             ("comparison", "Сравнение"),
             ("export", "Отчёт"),
             ("sensitivity", "Чувствительность"),
@@ -405,26 +409,27 @@ class DynamicsControlApp(ttk.Frame):
             ("identification", "Идентификация"),
         )
         self.nav_icons = {
-            key: create_icon(self.root, "sensitivity" if key == "identification" else key)
+            key: create_icon(self.root, "sensitivity" if key == "identification" else "results" if key == "model_result" else key)
             for key, _label in active_navigation
         }
         self.nav_labels = dict(active_navigation)
         self.research_label = ttk.Label(self.sidebar, text="Исследование", style="SidebarMeta.TLabel")
-        self.research_label.grid(row=9, column=0, sticky="w", padx=8, pady=(8, 2))
+        research_row = 2 + next(i for i, (key, _label) in enumerate(active_navigation) if key == "sensitivity")
+        self.research_label.grid(row=research_row, column=0, sticky="w", padx=8, pady=(8, 2))
         for row, (key, label) in enumerate(active_navigation, start=2):
-            if row >= 9:
+            if row >= research_row:
                 row += 1
             button = ttk.Button(
                 self.sidebar,
                 text=label,
                 image=self.nav_icons[key],
                 compound="left",
-                command=lambda page=key: self._show_page(page),
+                command=self._model_workspace if key == "disturbances" else lambda page=key: self._show_page(page),
                 style="SidebarNav.TButton",
             )
             button.grid(row=row, column=0, sticky="ew", pady=2)
             self.nav_buttons[key] = button
-            self._attach_tooltip(button, label)
+            self._attach_tooltip(button, "Открыть рабочую страницу выбранной модели" if key == "disturbances" else label)
 
         separator_row = 3 + len(active_navigation)
         ttk.Separator(self.sidebar).grid(
@@ -465,6 +470,7 @@ class DynamicsControlApp(ttk.Frame):
             "tuning_map",
             "identification",
             "tank",
+            "model_result",
             "scenarios",
             "export",
         ):
@@ -488,6 +494,8 @@ class DynamicsControlApp(ttk.Frame):
         self.identification_page.grid(row=0, column=0, sticky="nsew")
         self.tank_page = TankPage(self.page_contents["tank"], self)
         self.tank_page.grid(row=0, column=0, sticky="nsew")
+        self.model_result_page = ModelResultPage(self.page_contents["model_result"], self)
+        self.model_result_page.grid(row=0, column=0, sticky="nsew")
         for page in self.pages.values():
             page.bind_mousewheel()
 
@@ -575,6 +583,9 @@ class DynamicsControlApp(ttk.Frame):
         if event.width < 1240 * scale and not self.sidebar_collapsed:
             self.sidebar_collapsed = True
             self._apply_sidebar_state()
+        nav_padding = max(2, min(9, int((event.height / scale - 560) / 28)))
+        for style_name in ("SidebarNav.TButton", "SelectedSidebarNav.TButton"):
+            ttk.Style(self.root).configure(style_name, padding=(18, nav_padding))
         line_height = int(self.root.tk.call("font", "metrics", "TkDefaultFont", "-linespace")) + 4
         ttk.Style(self.root).configure("Treeview", rowheight=line_height)
         self.comparison_table.configure(height=max(3, min(6, int((event.height - 500 * scale) / line_height))))
@@ -583,7 +594,9 @@ class DynamicsControlApp(ttk.Frame):
             self._set_chart_mode("response")
 
     def _upper_chart_label(self):
-        if self.current_page == "tank":
+        if self.current_page == "model_result":
+            return "Входы модели"
+        elif self.current_page == "tank":
             return "Подача и отбор"
         if self.current_page in ("comparison", "sensitivity", "tuning_map"):
             return {"comparison": "Сравнение", "sensitivity": "Чувствительность", "tuning_map": "Карта настроек"}[self.current_page]
@@ -654,9 +667,13 @@ class DynamicsControlApp(ttk.Frame):
             ttk.Label(card, text=label, style="MetricTitle.TLabel", wraplength=160).grid(row=0, column=0, sticky="w")
             ttk.Label(card, textvariable=variable, style="MetricValue.TLabel").grid(row=1, column=0, sticky="w", pady=(4, 0))
 
+    def _model_workspace(self):
+        self._show_page(MODELS.named(self.selected_model.get()).entry_page)
+
     def _select_model(self, _event=None):
         self._cancel_task(announce=False)
-        self._show_page("tank" if self.selected_model.get() == "Бак" else getattr(self, "_absorber_page", "disturbances"))
+        model = MODELS.named(self.selected_model.get())
+        self._show_page(getattr(self, "_absorber_page", model.entry_page) if model.id == "absorber" else model.entry_page)
 
     def _show_page(self, page):
         titles = {
@@ -671,6 +688,7 @@ class DynamicsControlApp(ttk.Frame):
             "export": "Отчёт",
             "identification": "Идентификация по CSV",
             "tank": "Бак: опыт и регулирование",
+            "model_result": "Результат модели",
         }
         previous_page = self.current_page
         if previous_page in self.pages and previous_page != page:
@@ -685,15 +703,20 @@ class DynamicsControlApp(ttk.Frame):
             self.topbar_context.set(getattr(self,"_absorber_context","Абсорбер"))
             for axis in (self.disturbance_axis,self.response_axis):
                 axis.figure.set_layout_engine("constrained")
-        self.sidebar_title.configure(text="БАК" if page == "tank" else "АБСОРБЦИЯ")
-        self.selected_model.set("Бак" if page == "tank" else "Абсорбер")
-        if page != "tank":
+        if page != "model_result":
+            model = next((m for m in MODELS.all() if m.entry_page == page), MODELS.get("absorber"))
+            self.selected_model.set(model.name)
+        model = MODELS.named(self.selected_model.get())
+        self.sidebar_title.configure(text=model.sidebar)
+        if page == "model_result":
+            self.topbar_context.set(model.context)
+        if page not in ("tank", "model_result"):
             self._absorber_page = page
         elif previous_page != "tank":
             self._cancel_task(announce=False)
         for widget in self.absorber_action_widgets:
-            widget.grid_remove() if page == "tank" else widget.grid()
-        self.route_button.grid_remove() if page == "tank" else self.route_button.grid()
+            widget.grid_remove() if page == "model_result" or model.id != "absorber" else widget.grid()
+        self.route_button.grid_remove() if page == "model_result" or model.id != "absorber" else self.route_button.grid()
         self.pages[page].tkraise()
         if page in self._page_context:
             scroll, focus = self._page_context[page]
@@ -702,12 +725,17 @@ class DynamicsControlApp(ttk.Frame):
                 focus.focus_set()
         self.page_title.set(titles[page])
         if hasattr(self, "signal_mode_box"):
-            available = (page not in ("comparison", "sensitivity", "tuning_map", "identification", "tank")
+            available = (page not in ("comparison", "sensitivity", "tuning_map", "identification", "tank", "model_result")
                          and self.last_calculation is not None and self.last_calculation["controller"] is not None)
             self.signal_mode_box.configure(state="readonly" if available else "disabled")
-            self.signal_mode_box.grid_remove() if page == "tank" else self.signal_mode_box.grid()
+            self.signal_mode_box.grid_remove() if page in ("tank", "model_result") else self.signal_mode_box.grid()
+        self.nav_labels["disturbances"] = "Параметры опыта" if model.id == "absorber" else "Работа с моделью"
         for key, button in self.nav_buttons.items():
-            button.configure(style="SelectedSidebarNav.TButton" if key == page else "SidebarNav.TButton")
+            visible = model.id == "absorber" or key in ("disturbances", "model_result")
+            button.grid() if visible else button.grid_remove()
+            selected = key == page or (key == "disturbances" and page == model.entry_page)
+            button.configure(style="SelectedSidebarNav.TButton" if selected else "SidebarNav.TButton")
+        self._apply_sidebar_state()
         if previous_page == "comparison" and page != "comparison":
             if str(self.inspector) not in self.main_panes.panes():
                 self.main_panes.insert(0, self.inspector, weight=0)
@@ -735,10 +763,13 @@ class DynamicsControlApp(ttk.Frame):
             self._remove_map_colorbar()
             self._clear_map_click_callback()
             self.identification_page.draw()
+        elif page == "model_result":
+            self.metric_strip.grid_remove()
+            self.model_result_page.draw()
         elif page == "tank":
             self.metric_strip.grid_remove()
             self.tank_page.draw()
-        elif previous_page in ("identification", "tank") and page != "comparison":
+        elif previous_page in ("identification", "tank", "model_result") and page != "comparison":
             self._draw_last_calculation()
         elif page != "comparison" and previous_page in ("comparison", "sensitivity", "tuning_map") and self._charts_show_comparison:
             self._remove_map_colorbar()
@@ -761,7 +792,10 @@ class DynamicsControlApp(ttk.Frame):
         else:
             self.sidebar_title.grid()
             self.sidebar_meta.grid()
-            self.research_label.grid()
+            if MODELS.named(self.selected_model.get()).id == "absorber":
+                self.research_label.grid()
+            else:
+                self.research_label.grid_remove()
             self.sidebar.configure(padding=(12, 20))
             self.body.columnconfigure(0, minsize=220)
         for key, button in self.nav_buttons.items():
@@ -2517,7 +2551,8 @@ class DynamicsControlApp(ttk.Frame):
             "conclusion": self.student_conclusion.get(), "page": self.current_page,
             "selected_runs": list(self.comparison_table.selection()), "last_calculation": snapshot,
             "identification": self.identification_page.capture(),
-            "selected_model": "level_tank" if self.current_page == "tank" else "absorber",
+            "selected_model": MODELS.named(self.selected_model.get()).id,
+            "model_results": copy.deepcopy(self.model_results),
             "tank": self.tank_page.capture(),
         }
 
@@ -2579,6 +2614,12 @@ class DynamicsControlApp(ttk.Frame):
         self._refresh_comparison_table(laboratory["selected_runs"])
         self.identification_page.restore(laboratory.get("identification"))
         self.tank_page.restore(laboratory.get("tank"))
+        self.model_results = copy.deepcopy(laboratory.get("model_results", {}))
+        if result is not None and "absorber" not in self.model_results:
+            self.model_results["absorber"] = MODELS.result("absorber", result)
+        if self.tank_page.result is not None and "level_tank" not in self.model_results:
+            self.model_results["level_tank"] = MODELS.result("level_tank", self.tank_page.result)
+        self.selected_model.set(MODELS.get(laboratory["selected_model"]).name)
         self._show_page(laboratory["page"])
         self._mark_result_stale()
         self.calculate_button_text.set("Проверить прогноз" if self.assignment_enabled.get()
@@ -3309,12 +3350,13 @@ class DynamicsControlApp(ttk.Frame):
         metadata = {"disturbance_type": self.disturbance_type.get(), "input_state": state,
                     "title": self._active_scenario_title(), "lesson": copy.deepcopy(self.current_lesson),
                     "experiment_origin": self.identification_page.active_origin()}
-        self._start_task("Расчёт опыта", lambda cancel, progress: run_simulation(
-            state["chain"], state["model_values"], component_fraction, flow_fraction,
-            dynamics, controller, cancel=cancel, progress=progress),
+        self._start_task("Расчёт опыта", lambda cancel, progress: run_model("absorber",
+            dict(chain=state["chain"], parameters=state["model_values"], component=component_fraction,
+                 flow=flow_fraction, dynamics=dynamics, controller=controller), cancel=cancel, progress=progress),
             lambda result: self._apply_calculation(result, prediction, metadata))
 
     def _apply_calculation(self, result, prediction, metadata):
+        self.model_results["absorber"] = MODELS.result("absorber", result)
         self._undo_clear = None
         self.undo_clear_button.configure(state="disabled")
         result.update(metadata)
@@ -3745,7 +3787,7 @@ class DynamicsControlApp(ttk.Frame):
         self.response_canvas.draw_idle()
 
     def _redraw_signal_mode(self):
-        if self.last_calculation is not None and self.last_calculation["controller"] is not None and not self._charts_show_comparison and self.current_page not in ("identification", "tank"):
+        if self.last_calculation is not None and self.last_calculation["controller"] is not None and not self._charts_show_comparison and self.current_page not in ("identification", "tank", "model_result"):
             self._draw_calculation_result(self.last_calculation)
 
     def _draw_controller_signals(self, time, error, control, dynamics=None, commanded=None):
@@ -4079,6 +4121,21 @@ def _run_release_check(output_path):
             expected_tank = tank.capture()
             for extension in ("csv","html","pdf"):
                 write_tank_report(Path(directory)/f"tank.{extension}",expected_tank,extension)
+            from app.model_contract import read_result, write_result
+            from app.model_output import write_model_report
+            expected_models = copy.deepcopy(app.model_results)
+            if set(expected_models) != {model.id for model in MODELS.all()}:
+                raise RuntimeError("Не получены общие результаты обеих моделей.")
+            for model_id, common in expected_models.items():
+                app.selected_model.set(MODELS.get(model_id).name)
+                app._show_page("model_result")
+                path = Path(directory)/f"{model_id}-result.json"
+                write_result(path, common, MODELS)
+                if read_result(path, MODELS) != common:
+                    raise RuntimeError("Общий результат восстановлен неточно.")
+                for extension in ("csv", "html", "pdf"):
+                    write_model_report(Path(directory)/f"{model_id}-result.{extension}", common, extension, MODELS)
+            app._show_page("tank")
             expected = app.last_calculation["final_response"].copy()
             app.student_conclusion.set("Проверка восстановления релиза")
             app._save_autosave()
@@ -4099,6 +4156,9 @@ def _run_release_check(output_path):
             if app.current_page != "tank" or app.tank_page.capture() != expected_tank:
                 raise RuntimeError("Не удалось точно восстановить работу с баком.")
             report["tank_workflow_verified"] = True
+            if app.model_results != expected_models:
+                raise RuntimeError("Общие результаты моделей восстановлены неточно.")
+            report["model_contract_verified"] = True
             app._close_application()
             root = None
             report.update(status="passed", gui_started=True, autosave_restored=True)

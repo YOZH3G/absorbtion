@@ -182,6 +182,7 @@ def simulate(values, *, controller=None, local_model=None, cancel=None, progress
 
 def compare_regimes(values, local_model, gain, integral_time, setpoint, *, cancel=None, progress=None):
     from .calculations import tune_controller_parameters
+    from .physical_models import run_model
     p = validate_inputs(values)
     k, t, delay = (float(local_model[n]) for n in ("gain", "time_constant", "delay"))
     if not np.isfinite([k, t, delay]).all() or k <= 0 or t <= 0 or delay < 0:
@@ -198,8 +199,9 @@ def compare_regimes(values, local_model, gain, integral_time, setpoint, *, cance
         for name, kp, ti in settings:
             q = equilibrium(p, h)
             inputs = dict(p, initial_level=h, pump=q)
-            run = simulate(inputs, controller=dict(gain=kp, integral_time=ti, setpoint=float(setpoint)),
-                           local_model=local_model if number == 0 else None, cancel=cancel)
+            run = run_model(MODEL_ID, dict(parameters=inputs,
+                            controller=dict(gain=kp, integral_time=ti, setpoint=float(setpoint)),
+                            local_model=local_model if number == 0 else None), cancel=cancel)
             run["name"] = f"{name}: {h:.4g} м"
             cases.append(run)
         if progress:

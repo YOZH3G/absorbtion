@@ -15,6 +15,7 @@ from .controller_extensions import EXTENSION_DEFAULTS, extensions_from_form
 from .validation import parse_disturbance, parse_nonnegative_number, parse_percentage, parse_positive_number
 from .identification import validate_experiment_state, validate_experiment_origin
 from .tank_state import validate_tank_state
+from .physical_models import MODELS, run_model
 
 
 FORMAT_VERSION = 3
@@ -206,9 +207,15 @@ def validate_laboratory(laboratory):
     restored = copy.deepcopy(laboratory)
     restored["tank"] = validate_tank_state(restored.get("tank"))
     restored.setdefault("selected_model", "absorber")
-    if restored["selected_model"] not in ("absorber", "level_tank"):
-        raise ValueError("Лабораторная: неизвестная физическая модель.")
-    if (restored["selected_model"] == "level_tank") != (restored.get("page") == "tank"):
+    model = MODELS.get(restored["selected_model"])
+    results = restored.get("model_results", {})
+    if not isinstance(results, dict):
+        raise ValueError("Лабораторная: неверные результаты моделей.")
+    restored["model_results"] = {key: MODELS.validate(value) for key, value in results.items()}
+    if any(key != value["model_id"] for key, value in restored["model_results"].items()):
+        raise ValueError("Лабораторная: идентификатор результата не соответствует модели.")
+    if (restored.get("page") != "model_result"
+            and (model.entry_page == "tank") != (restored.get("page") == "tank")):
         raise ValueError("Лабораторная: выбранная модель не соответствует разделу.")
     restored["identification"] = validate_experiment_state(restored.get("identification"))
     validate_input_state(restored.get("input_state"), draft=True)
@@ -234,7 +241,7 @@ def validate_laboratory(laboratory):
             not isinstance(value, str) for value in restored["selected_runs"]):
         raise ValueError("Лабораторная: выбранные опыты должны быть списком идентификаторов.")
     if restored["page"] not in ("disturbances", "dynamics", "results", "comparison", "controller",
-                                "sensitivity", "tuning_map", "scenarios", "export", "identification", "tank"):
+                                "sensitivity", "tuning_map", "scenarios", "export", "identification", "tank", "model_result"):
         raise ValueError("Лабораторная: неизвестный раздел.")
     draft = restored.get("prediction_fields")
     if not isinstance(draft, dict):
@@ -310,7 +317,6 @@ def _validate_evaluation(evaluation):
 def restore_calculation(snapshot):
     if snapshot is None:
         return None
-    from .simulation import run_simulation
     scenario = validate_input_state(snapshot["input_state"])
     kinds = {"Ступенчатое": STEP, "Импульсное": IMPULSE,
              "Временное прямоугольное": RECTANGLE, "Плавно нарастающее": RAMP}
@@ -322,8 +328,9 @@ def restore_calculation(snapshot):
         controller = {**{key: scenario["controller"][key] for key in EXTENSION_DEFAULTS},
             "controller_type": controller["type"], "controller_gain": controller["gain"],
                       **{key: controller[key] for key in ("integral_time", "derivative_time", "control_limit", "setpoint")}}
-    result = run_simulation(scenario["chain"], scenario["model_values"], scenario["component"] or 0,
-                            scenario["flow"] or 0, dynamics, controller)
+    result = run_model("absorber", dict(chain=scenario["chain"], parameters=scenario["model_values"],
+                      component=scenario["component"] or 0, flow=scenario["flow"] or 0,
+                      dynamics=dynamics, controller=controller))
     result.update({key: copy.deepcopy(snapshot.get(key))
                    for key in ("input_state", "title", "lesson", "prediction", "evaluation", "experiment_origin")})
     result["disturbance_type"] = scenario["disturbance_type"]

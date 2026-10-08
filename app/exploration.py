@@ -4,7 +4,7 @@ import copy
 
 import numpy as np
 
-from .simulation import run_simulation
+from .physical_models import run_model
 from .background_tasks import check_cancelled
 
 
@@ -54,13 +54,9 @@ def sensitivity_runs(
             adjusted_component = value
         else:
             adjusted_flow = value
-        result = run_simulation(
-            chain,
-            model_values,
-            adjusted_component,
-            adjusted_flow,
-            adjusted_dynamics,
-            controller,
+        result = run_model("absorber",
+            dict(chain=chain, parameters=model_values, component=adjusted_component,
+                 flow=adjusted_flow, dynamics=adjusted_dynamics, controller=controller),
             cancel=cancel,
             progress=None if progress is None else lambda fraction: progress((index + fraction) / len(values)),
         )
@@ -107,13 +103,9 @@ def controller_setting_map(
                 "control_limit": control_limit,
                 "setpoint": setpoint,
             }
-            result = run_simulation(
-                chain,
-                model_values,
-                component_fraction,
-                flow_fraction,
-                dynamics,
-                controller,
+            result = run_model("absorber",
+                dict(chain=chain, parameters=model_values, component=component_fraction,
+                     flow=flow_fraction, dynamics=dynamics, controller=controller),
                 cancel=cancel,
                 progress=None if progress is None else lambda fraction: progress(
                     (row * len(gains) + column + fraction) / (len(rows) * len(gains))),
