@@ -32,7 +32,7 @@ def write_experiment_report(path, state, format_name):
                     f"RMSE={fit['rmse']:.8g}; относительная ошибка={fit['normalized_rmse']*100:.6g}%",
                     "Подгонка к одной ступени не подтверждает модель за пределами исходного режима."])]
     figures = []
-    figure = Figure(figsize=(9, 8), constrained_layout=True)
+    figure = Figure(figsize=(9, 8))
     axes = figure.subplots(3, 1)
     for axis, label in zip(axes, ("Вход, приведённые единицы", "Выход, приведённые единицы", "Остаток")):
         axis.set_ylabel(label)
@@ -50,7 +50,7 @@ def write_experiment_report(path, state, format_name):
             f"RMSE={validation['rmse']:.8g}; ошибка={validation['normalized_rmse']*100:.6g}%",
             f"Версия идентификации: {validation['origin']['result_revision']}", validation["warning"],
             "Параметры зафиксированы до загрузки проверочной записи."]))
-        figure = Figure(figsize=(9, 8), constrained_layout=True)
+        figure = Figure(figsize=(9, 8))
         axes = figure.subplots(3, 1)
         for axis, label in zip(axes, ("Вход, приведённые единицы", "Выход, приведённые единицы", "Остаток")):
             axis.set_ylabel(label)
@@ -66,7 +66,7 @@ def write_experiment_report(path, state, format_name):
                  f"Назначение сигналов: {control['input_role']} → {control['output_role']}",
                  f"Версия идентификации: {control['origin']['result_revision']}",
                  "Проверка выполнена в симуляции, оборудование не подключалось."]
-        figure = Figure(figsize=(9, 8), constrained_layout=True)
+        figure = Figure(figsize=(9, 8))
         axes = figure.subplots(3, 1)
         for axis, label in zip(axes, (control["output_role"], "Ошибка, доля", "η, доля")):
             axis.set_ylabel(label)
@@ -84,6 +84,7 @@ def write_experiment_report(path, state, format_name):
         sections.append(("PI-регулирование", lines))
         figures.append(figure)
     for figure in figures:
+        figure.subplots_adjust(left=.14, right=.98, bottom=.08, top=.97, hspace=.5)
         for axis in figure.axes:
             axis.set_xlabel("Время, с")
             axis.legend()

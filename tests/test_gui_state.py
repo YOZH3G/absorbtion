@@ -55,7 +55,22 @@ class GuiStateTests(unittest.TestCase):
         self.assertEqual(page.capture(), snapshot)
         for fmt in ("html", "pdf"):
             output = Path(self.directory.name)/f"experiment.{fmt}"
-            write_experiment_report(output, page.capture(), fmt)
+            from app.exporting import _write_pdf
+            with patch("app.exporting._write_pdf", wraps=_write_pdf) as export_pdf:
+                write_experiment_report(output, page.capture(), fmt)
+            if fmt == "pdf":
+                from matplotlib.backends.backend_agg import FigureCanvasAgg
+                for figure in export_pdf.call_args.args[1]:
+                    if len(figure.axes) != 3:
+                        continue
+                    positions = [axis.get_position().bounds for axis in figure.axes]
+                    canvas = FigureCanvasAgg(figure)
+                    canvas.draw()
+                    for axis, position in zip(figure.axes, positions):
+                        np.testing.assert_allclose(axis.get_position().bounds, position, atol=1e-12)
+                        bounds = axis.yaxis.label.get_window_extent(canvas.get_renderer())
+                        self.assertGreaterEqual(bounds.x0, 0)
+                        self.assertLessEqual(bounds.x1, figure.bbox.width)
             self.assertGreater(output.stat().st_size, 1000)
         write_experiment_csv(Path(self.directory.name)/"all.csv", snapshot)
         before = json.dumps(page.pi_result, sort_keys=True)
