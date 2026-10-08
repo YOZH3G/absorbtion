@@ -19,6 +19,7 @@ DISTURBANCE_TYPES = (
     "Плавно нарастающее",
 )
 CHAINS = ("lean_gas", "rich_absorbent")
+# Keep the existing data directory so upgrades retain user scenarios and settings.
 APP_DIRECTORY_NAME = "AbsorptionTrainer"
 USER_FILE_NAME = "scenarios.json"
 

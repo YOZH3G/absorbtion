@@ -5,7 +5,7 @@ from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.figure import Figure
 
 from app.plotting import adaptive_legend
-from main import AbsorptionApp
+from main import DynamicsControlApp
 
 
 LABELS = ("Исходный режим", "Только состав", "Только расход", "Совместное воздействие", "Без регулятора")
@@ -36,8 +36,8 @@ class LegendTests(unittest.TestCase):
 
     def test_text_keyboard_and_band_toggle_with_visibility_preserved_on_resize(self):
         figure, canvas, axis = chart(1000)
-        AbsorptionApp._place_legend_above(axis)
-        AbsorptionApp._enable_legend_toggles(axis, canvas)
+        DynamicsControlApp._place_legend_above(axis)
+        DynamicsControlApp._enable_legend_toggles(axis, canvas)
         canvas.draw()
         text = axis.get_legend().get_texts()[0]
         mouse = MouseEvent("button_press_event", canvas, 10, 10, button=1)

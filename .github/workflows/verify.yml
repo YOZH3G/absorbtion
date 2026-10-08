@@ -48,10 +48,10 @@ jobs:
         if: runner.os == 'Windows'
         uses: actions/upload-artifact@v7
         with:
-          name: AbsorptionTrainer-${{ github.sha }}
+          name: DynamicsControlLab-${{ github.sha }}
           if-no-files-found: error
           path: |
-            dist/AbsorptionTrainer.exe
+            dist/DynamicsControlLab.exe
             build/release-check.json
             output/pdf/docs.pdf
             requirements.txt

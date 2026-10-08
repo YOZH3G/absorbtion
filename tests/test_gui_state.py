@@ -241,7 +241,7 @@ class GuiStateTests(unittest.TestCase):
         self.root = tk.Tk()
         self.root.withdraw()
         with patch.object(main, "ScenarioStore", return_value=self.store):
-            self.app = main.AbsorptionApp(self.root)
+            self.app = main.DynamicsControlApp(self.root)
         self.assertEqual(self.app.student_conclusion.get(), "Восстановлено после запуска")
         self.assertEqual(self.app.component_value.get(), "-")
         np.testing.assert_array_equal(self.app.last_calculation["final_response"], original)
@@ -339,7 +339,7 @@ class GuiStateTests(unittest.TestCase):
         self.directory = tempfile.TemporaryDirectory()
         self.store = ScenarioStore(Path(self.directory.name) / "scenarios.json")
         with patch.object(main, "ScenarioStore", return_value=self.store):
-            self.app = main.AbsorptionApp(self.root)
+            self.app = main.DynamicsControlApp(self.root)
         self.app._apply_scenario_data(self.app.scenarios[1])
         self.app._calculate()
         self.wait_for_task()
@@ -450,7 +450,7 @@ class GuiStateTests(unittest.TestCase):
         self.root = tk.Tk()
         self.root.withdraw()
         with patch.object(main, "ScenarioStore", return_value=self.store):
-            self.app = main.AbsorptionApp(self.root)
+            self.app = main.DynamicsControlApp(self.root)
         self.root.update_idletasks()
         self.assertEqual(self.app.chart_mode, "response")
         self.assertEqual(len(self.app.chart_panes.panes()), 1)
@@ -463,7 +463,7 @@ class GuiStateTests(unittest.TestCase):
         self.root = tk.Tk()
         self.root.withdraw()
         with patch.object(main, "ScenarioStore", return_value=self.store):
-            self.app = main.AbsorptionApp(self.root)
+            self.app = main.DynamicsControlApp(self.root)
         self.root.update_idletasks()
         self.assertEqual(self.app.current_page, "comparison")
         self.assertEqual(self.app.chart_mode, "input")

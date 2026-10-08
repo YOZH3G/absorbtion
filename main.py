@@ -11,8 +11,8 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolb
 from matplotlib.colors import ListedColormap
 from matplotlib.figure import Figure
 
-APP_NAME = "Учебный стенд физических моделей"
-APP_VERSION = "1.7.0"
+APP_NAME = "Лаборатория динамики и управления"
+APP_VERSION = "1.7.1"
 
 from app.calculations import (
     CONTROLLER_TYPES,
@@ -103,7 +103,7 @@ CURVE_STYLES = {
 
 
 
-class AbsorptionApp(ttk.Frame):
+class DynamicsControlApp(ttk.Frame):
     def __init__(self, root, scenario_path=None):
         super().__init__(root, style="App.TFrame")
         self.root = root
@@ -2322,7 +2322,7 @@ class AbsorptionApp(ttk.Frame):
             title="Экспортировать сравнение",
             defaultextension=".csv",
             filetypes=(("CSV", "*.csv"),),
-            initialfile="absorption_comparison.csv",
+            initialfile="dynamics_control_comparison.csv",
         )
         if not selected:
             return
@@ -2348,7 +2348,7 @@ class AbsorptionApp(ttk.Frame):
             title="Сохранить отчёт по сравнению",
             defaultextension=f".{format_name}",
             filetypes=((format_name.upper(), f"*.{format_name}"),),
-            initialfile=f"absorption_comparison_report.{format_name}",
+            initialfile=f"dynamics_control_comparison_report.{format_name}",
         )
         if not selected:
             return
@@ -2444,7 +2444,7 @@ class AbsorptionApp(ttk.Frame):
             title="Сохранить учебный сеанс",
             defaultextension=".json",
             filetypes=(("Учебный сеанс JSON", "*.json"),),
-            initialfile="absorption_session.json",
+            initialfile="dynamics_control_session.json",
         )
         if not selected:
             return
@@ -2842,7 +2842,7 @@ class AbsorptionApp(ttk.Frame):
             title="Сохранить графики",
             defaultextension=".png",
             filetypes=(("PNG", "*.png"),),
-            initialfile="absorption_result.png",
+            initialfile="dynamics_control_result.png",
         )
         if not selected:
             return
@@ -2864,7 +2864,7 @@ class AbsorptionApp(ttk.Frame):
             title="Экспортировать точки",
             defaultextension=".csv",
             filetypes=(("CSV", "*.csv"),),
-            initialfile="absorption_result.csv",
+            initialfile="dynamics_control_result.csv",
         )
         if not selected:
             return
@@ -2890,7 +2890,7 @@ class AbsorptionApp(ttk.Frame):
             title="Сохранить протокол",
             defaultextension=".txt",
             filetypes=(("Текстовый файл", "*.txt"),),
-            initialfile="absorption_protocol.txt",
+            initialfile="dynamics_control_protocol.txt",
         )
         if not selected:
             return
@@ -2915,7 +2915,7 @@ class AbsorptionApp(ttk.Frame):
             title="Сохранить отчёт лабораторной работы",
             defaultextension=f".{format_name}",
             filetypes=((format_name.upper(), f"*.{format_name}"),),
-            initialfile=f"absorption_lab_report.{format_name}",
+            initialfile=f"dynamics_control_lab_report.{format_name}",
         )
         if not selected:
             return
@@ -3851,8 +3851,8 @@ class AbsorptionApp(ttk.Frame):
             return
 
         def resized(_event):
-            AbsorptionApp._place_legend_above(axis, handles, labels)
-            AbsorptionApp._enable_legend_toggles(axis, canvas)
+            DynamicsControlApp._place_legend_above(axis, handles, labels)
+            DynamicsControlApp._enable_legend_toggles(axis, canvas)
             canvas.draw_idle()
 
         canvas._legend_resize_callback = canvas.mpl_connect("resize_event", resized)
@@ -4006,11 +4006,11 @@ def _run_release_check(output_path):
     report = {"version": APP_VERSION, "frozen": bool(getattr(sys, "frozen", False)), "status": "failed"}
     root = None
     try:
-        with tempfile.TemporaryDirectory(prefix="absorption-release-") as directory:
+        with tempfile.TemporaryDirectory(prefix="dynamics-control-release-") as directory:
             scenario_path = Path(directory) / "scenarios.json"
             root = tk.Tk()
             root.withdraw()
-            app = AbsorptionApp(root, scenario_path)
+            app = DynamicsControlApp(root, scenario_path)
             for scenario in app.scenarios:
                 app._apply_scenario_data(scenario)
                 app._calculate()
@@ -4088,7 +4088,7 @@ def _run_release_check(output_path):
             root = None
             root = tk.Tk()
             root.withdraw()
-            app = AbsorptionApp(root, scenario_path)
+            app = DynamicsControlApp(root, scenario_path)
             if (app.last_calculation is None
                     or not np.array_equal(expected, app.last_calculation["final_response"])
                     or app.student_conclusion.get() != "Проверка восстановления релиза"):
@@ -4117,7 +4117,7 @@ def main():
     if len(sys.argv) == 3 and sys.argv[1] == "--smoke-test":
         raise SystemExit(_run_release_check(sys.argv[2]))
     root = tk.Tk()
-    AbsorptionApp(root)
+    DynamicsControlApp(root)
     root.mainloop()
 
 

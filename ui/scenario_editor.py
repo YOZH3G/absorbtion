@@ -927,7 +927,7 @@ class ScenarioEditorDialog(tk.Toplevel):
             title="Экспортировать комплект сценариев",
             defaultextension=".json",
             filetypes=(("Комплект сценариев JSON", "*.json"),),
-            initialfile="absorption_scenarios.json",
+            initialfile="dynamics_control_scenarios.json",
         )
         if not selected:
             return

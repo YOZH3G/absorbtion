@@ -40,7 +40,7 @@ executable = EXE(
     analysis.binaries,
     analysis.datas,
     [],
-    name="AbsorptionTrainer",
+    name="DynamicsControlLab",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
