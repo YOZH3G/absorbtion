@@ -9,6 +9,7 @@ from tkinter import filedialog, ttk
 
 from app.identification import experiment_columns, export_identification, identify_step, read_experiment, validate_experiment_state
 from app.experiment_control import validate_step, compare_pi
+from .absorber_sensitivity import AbsorberSensitivity, VIEW as ABSORBER_VIEW
 
 
 def settling_text(value):
@@ -56,7 +57,7 @@ class IdentificationPage(ttk.Frame):
             ttk.Combobox(self, textvariable=self.units[index], values=("с", "мин") if index == 0 else ("как в файле", "%"),
                          state="readonly", width=12).grid(row=row + 1, column=1, sticky="ew")
         ttk.Button(self, text="Оценить K, T и L", command=self.calculate).grid(row=10, column=0, columnspan=2, sticky="ew", pady=10)
-        ttk.Combobox(self, textvariable=self.view, values=("Отклик", "Остаток", "Проверка", "Регулирование"), state="readonly").grid(row=11, column=0, columnspan=2, sticky="ew")
+        ttk.Combobox(self, textvariable=self.view, values=("Отклик", "Остаток", "Проверка", "Регулирование", ABSORBER_VIEW), state="readonly").grid(row=11, column=0, columnspan=2, sticky="ew")
         ttk.Label(self, textvariable=self.summary, style="Body.TLabel", wraplength=320).grid(row=12, column=0, columnspan=2, sticky="ew", pady=10)
         self.apply_button = ttk.Button(self, text="Применить T и L", command=self.apply, state="disabled")
         self.apply_button.grid(row=13, column=0, columnspan=2, sticky="ew")
@@ -90,6 +91,8 @@ class IdentificationPage(ttk.Frame):
         ttk.Button(self, text="Полный протокол PDF", command=lambda: self.export_protocol("pdf")).grid(row=35, column=0, columnspan=2, sticky="ew", pady=5)
         ttk.Button(self, text="Сеанс и все результаты JSON", command=self.app._save_comparison_session).grid(row=36, column=0, columnspan=2, sticky="ew")
         ttk.Button(self, text="Все результаты CSV", command=self.export_all_csv).grid(row=37, column=0, columnspan=2, sticky="ew", pady=5)
+        self.absorber_sensitivity = AbsorberSensitivity(self)
+        self.absorber_sensitivity.grid(row=38, column=0, columnspan=2, sticky="ew", pady=12)
         for variable in (*self.columns, *self.units, self.delimiter):
             variable.trace_add("write", self.changed)
         self.view.trace_add("write", self.view_changed)
@@ -98,9 +101,12 @@ class IdentificationPage(ttk.Frame):
 
     def signature(self):
         return (self.generation, *(v.get() for v in (*self.columns, *self.units, self.delimiter,
-                self.metadata["input_role"], self.metadata["output_role"], *self.pi_settings.values())), self.same_signals.get())
+                self.metadata["input_role"], self.metadata["output_role"], *self.pi_settings.values())), self.same_signals.get(),
+                self.result_revision, tuple(self.absorber_sensitivity.configuration().values()))
 
     def view_changed(self, *_):
+        if self.view.get() == ABSORBER_VIEW:
+            self.draw(); return
         if self.result is None:
             return
         if self.view.get() == "Проверка" and self.validation is not None:
@@ -232,9 +238,12 @@ class IdentificationPage(ttk.Frame):
         self.app._set_status("Сравнение PI выполнено")
 
     def draw(self):
+        if self.app.current_page == "identification" and self.view.get() == ABSORBER_VIEW:
+            self.absorber_sensitivity.draw(); return
         if self.result is None or self.app.current_page != "identification":
             return
         app, result = self.app, self.result
+        app.signal_mode_box.grid()
         app._remove_controller_axis()
         special = self.validation if self.view.get() == "Проверка" else self.pi_result if self.view.get() == "Регулирование" else None
         if special is not None:
@@ -305,6 +314,7 @@ class IdentificationPage(ttk.Frame):
             metadata={k: v.get() for k, v in self.metadata.items()}, same_signals=self.same_signals.get(),
             pi_settings={k: v.get() for k, v in self.pi_settings.items()},
             validation=copy.deepcopy(self.validation), pi_result=copy.deepcopy(self.pi_result),
+            absorber_sensitivity=self.absorber_sensitivity.capture(),
             applied_origin=copy.deepcopy(self.applied_origin)))
 
     def restore(self, state):
@@ -317,6 +327,8 @@ class IdentificationPage(ttk.Frame):
         for button in (self.apply_button, *self.export_buttons):
             button.configure(state="disabled")
         if state is None:
+            from app.absorber_sensitivity import FIELD_DEFAULTS
+            self.absorber_sensitivity.restore(dict(fields=FIELD_DEFAULTS, result=None, selected=0))
             self.experiment_id = uuid.uuid4().hex
             self.result_revision = 0
             for key, variable in self.metadata.items():
@@ -361,6 +373,7 @@ class IdentificationPage(ttk.Frame):
         self.validation = state.get("validation")
         self.pi_result = state.get("pi_result")
         self.applied_origin = state.get("applied_origin")
+        self.absorber_sensitivity.restore(state["absorber_sensitivity"])
         if self.view.get() == "Регулирование" and self.pi_result is not None:
             self.accept_pi(self.pi_result)
         elif self.view.get() == "Проверка" and self.validation is not None:

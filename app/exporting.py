@@ -95,6 +95,15 @@ def write_experiment_report(path, state, format_name):
                 or record["origin"]["result_revision"] != state.get("result_revision", 0)):
             sections.append(("Снимок прежнего опыта", [f"{key}: исходные данные или идентификация изменились. Показаны сохранённые результаты."]))
     title = metadata.get("title") or "Эксперимент и проверка регулятора"
+    block = state.get("absorber_sensitivity", {})
+    if block.get("result") is not None:
+        from .absorber_sensitivity_exporting import report_parts
+        snapshot = dict(block["result"], exported_stale=(block.get("stale", False) or block["result"]["fields"] != block["fields"]
+            or block["result"]["origin"]["data_revision"] != state.get("data_revision", 0)
+            or block["result"]["origin"]["result_revision"] != state.get("result_revision", 0)))
+        parts, error_figures = report_parts(snapshot, block["selected"])
+        sections.extend(("Абсорбер: "+name, text.split("\n")) for name, text in parts)
+        figures.extend(error_figures)
     if format_name == "pdf":
         return _write_pdf(path, [*_text_pages(title, [(name, "\n".join(lines)) for name, lines in sections]), *figures])
     if format_name != "html":
@@ -119,6 +128,15 @@ def write_experiment_csv(path, state):
         if state.get("pi_result") is not None:
             for run in state["pi_result"]["runs"]:
                 writer.writerows((run["name"], t, "", "", y, e, u) for t, y, e, u in zip(*(run[k] for k in ("time", "output", "error", "control"))))
+        block = state.get("absorber_sensitivity", {})
+        if block.get("result") is not None:
+            from .tank_sensitivity_exporting import case_label
+            result = block["result"]
+            output = "xog" if result["request"]["chain"] == "lean_gas" else "xna"
+            for case in result["controls"]+result["cases"]:
+                run = case["run"]
+                writer.writerows(("Абсорбер: "+case_label(case), t, "", "", y, e, u)
+                    for t, y, e, u in zip(run["time"], *(run["signals"][key] for key in (output, "error", "control"))))
     return Path(path)
 
 

@@ -12,7 +12,7 @@ from matplotlib.colors import ListedColormap
 from matplotlib.figure import Figure
 
 APP_NAME = "Лаборатория динамики и управления"
-APP_VERSION = "1.9.0"
+APP_VERSION = "1.10.0"
 
 from app.calculations import (
     CONTROLLER_TYPES,
@@ -594,6 +594,8 @@ class DynamicsControlApp(ttk.Frame):
             self._set_chart_mode("response")
 
     def _upper_chart_label(self):
+        if self.current_page == "identification" and self.identification_page.view.get() == "Ошибки на абсорбере":
+            return "Ошибки K/T"
         if self.current_page == "model_result":
             return "Входы модели"
         elif self.current_page == "tank":
@@ -2709,6 +2711,8 @@ class DynamicsControlApp(ttk.Frame):
             return
         self._invalidate_task()
         if self.last_calculation is None or "input_state" not in self.last_calculation:
+            if hasattr(self, "identification_page") and self.current_page == "identification" and self.identification_page.view.get() == "Ошибки на абсорбере":
+                self.identification_page.draw()
             return
         stale = self._normalized_input_state(self._capture_input_state()) != self._normalized_input_state(self.last_calculation["input_state"])
         self.export_summary.set("Параметры изменены — пересчитайте опыт. Экспорт относится к последнему расчёту."
@@ -2716,6 +2720,8 @@ class DynamicsControlApp(ttk.Frame):
         chain_name = "обеднённый газ" if self.last_calculation["chain"] == LEAN_GAS else "насыщенный абсорбент"
         self.response_subtitle.set(f"Параметры изменены — последний расчёт: {chain_name}" if stale
                                    else f"Последний расчёт: {chain_name}")
+        if hasattr(self, "identification_page") and self.current_page == "identification" and self.identification_page.view.get() == "Ошибки на абсорбере":
+            self.identification_page.draw()
 
     def _capture_input_state(self):
         return {
@@ -4097,6 +4103,25 @@ def _run_release_check(output_path):
             validation_output = .3 + fitted["gain"]*.5*-np.expm1(-np.maximum(validation_time-15-fitted["delay"], 0)/fitted["time_constant"])
             page.accept_validation(dict(validate_step(validation_time, validation_input, validation_output, fitted),
                                         source="release-validation.csv", origin=page.origin()))
+            app.chain = RICH_ABSORBENT
+            app.controller_enabled.set(True); app.controller_type.set("PI")
+            app.setpoint.set("30.5"); app.control_limit.set("20")
+            app.component_enabled.set(False); app.flow_enabled.set(False)
+            app.simulation_duration.set("100"); app.time_constant.set("8"); app.delay.set("0")
+            for key, value in dict(k_errors="0;20", t_errors="0", l_errors="0").items():
+                page.absorber_sensitivity.fields[key].set(value)
+            page.absorber_sensitivity.start()
+            deadline = time.monotonic()+30
+            while app._task is not None:
+                if time.monotonic() >= deadline: raise RuntimeError("Превышено время проверки ошибок оценки абсорбера.")
+                root.update(); time.sleep(.01)
+            errors = page.absorber_sensitivity.result
+            if errors is None or len(errors["cases"]) != 2:
+                raise RuntimeError(page.summary.get())
+            from app.absorber_sensitivity_exporting import write_report as write_absorber_errors
+            for extension in ("csv", "html", "pdf"):
+                write_absorber_errors(Path(directory)/f"absorber-errors.{extension}", errors, 1, extension)
+            report["absorber_identification_errors_verified"] = True
             from app.exporting import write_experiment_report
             write_experiment_report(Path(directory)/"experiment.html", page.capture(), "html")
             expected_experiment = page.capture()

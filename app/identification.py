@@ -58,7 +58,7 @@ def validate_experiment_state(state):
             or any(u not in ("как в\u00a0файле", "%") for u in units[1:])):
         raise ValueError("Эксперимент: неизвестные единицы.")
     if (not isinstance(state.get("source"), str) or state.get("delimiter") not in (";", ",", "табуляция")
-            or state.get("view") not in ("Отклик", "Остаток", "Проверка", "Регулирование")
+            or state.get("view") not in ("Отклик", "Остаток", "Проверка", "Регулирование", "Ошибки на абсорбере")
             or not isinstance(state.get("result_current"), bool)):
         raise ValueError("Эксперимент: некорректные настройки страницы.")
     result = state.get("result")
@@ -177,6 +177,46 @@ def validate_experiment_state(state):
             raise ValueError("Эксперимент: неизвестное назначение сигналов PI.")
     if not isinstance(state.get("same_signals", False), bool):
         raise ValueError("Эксперимент: подтверждение сигналов должно быть логическим.")
+    from .absorber_sensitivity import FIELD_DEFAULTS, parse_fields, validate_result
+    block = state.setdefault("absorber_sensitivity", dict(fields=FIELD_DEFAULTS.copy(), result=None, selected=0))
+    if (not isinstance(block, dict) or not isinstance(block.get("fields"), dict)
+            or set(block["fields"]) != set(FIELD_DEFAULTS) or any(not isinstance(v, str) for v in block["fields"].values())
+            or type(block.get("selected")) is not int or block["selected"] < 0):
+        raise ValueError("Эксперимент: неверная форма ошибок оценки на абсорбере.")
+    block.setdefault("stale", False)
+    if type(block["stale"]) is not bool:
+        raise ValueError("Эксперимент: неверный признак актуальности опыта.")
+    record = block.get("result")
+    if record is not None:
+        validate_result(record)
+        origin = validate_experiment_origin(record.get("origin"))
+        if origin is None or origin["parameters"] != record["local_model"]:
+            raise ValueError("Эксперимент: неверный источник ошибок оценки.")
+        from .absorber_sensitivity import finite
+        for value in origin["parameters"].values(): finite(value)
+        output_role = "Xог, доля" if record["request"]["chain"] == "lean_gas" else "Xна, доля"
+        if origin["metadata"].get("input_role") != "η, доля" or origin["metadata"].get("output_role") != output_role:
+            raise ValueError("Эксперимент: источник не соответствует каналу абсорбера.")
+        grid, requirements = parse_fields(record.get("fields"))
+        if grid != record["grid"] or requirements != record["requirements"] or block["selected"] >= len(record["cases"]):
+            raise ValueError("Эксперимент: неверные условия или выбранный узел.")
+        from .session_store import validate_input_state
+        scenario = validate_input_state(record.get("input_state"))
+        from .scenario_store import DISTURBANCE_TYPES
+        physical = record["request"]
+        expected_dynamics = {key: scenario[key] for key in ("start_time", "effect_duration", "simulation_duration", "time_constant", "delay")}
+        expected_dynamics["kind"] = dict(zip(DISTURBANCE_TYPES, ("step", "impulse", "rectangle", "ramp")))[scenario["disturbance_type"]]
+        controller = scenario["controller"]
+        if controller is None:
+            raise ValueError("Эксперимент: отсутствует исходный PI.")
+        expected_controller = {key: value for key, value in controller.items() if key not in ("type", "gain")}
+        expected_controller.update(controller_type=controller["type"], controller_gain=controller["gain"])
+        if (physical["chain"] != scenario["chain"] or physical["parameters"] != scenario["model_values"]
+                or physical["component"] != scenario["component"] or physical["flow"] != (scenario["flow"] or 0.)
+                or physical["dynamics"] != expected_dynamics or physical["controller"] != expected_controller):
+            raise ValueError("Эксперимент: форма не соответствует физическим условиям расчёта.")
+    elif block["selected"] != 0:
+        raise ValueError("Эксперимент: выбран узел без результата.")
     return state
 
 

@@ -15,6 +15,91 @@ from ui.scenario_editor import ScenarioEditorDialog
 
 
 class GuiStateTests(unittest.TestCase):
+    def prepare_absorber_errors(self):
+        app, page = self.app, self.app.identification_page
+        app._show_page("identification")
+        page.load_path(Path("data/identification_step.csv"))
+        page.metadata["input_role"].set("η, доля"); page.metadata["output_role"].set("Xна, доля")
+        page.calculate(); self.wait_for_task()
+        app.chain = RICH_ABSORBENT
+        app.controller_enabled.set(True); app.controller_type.set("PI")
+        app.setpoint.set("30.5"); app.control_limit.set("20")
+        app.simulation_duration.set("100"); app.time_constant.set("8"); app.delay.set("0")
+        app.component_enabled.set(False); app.flow_enabled.set(False)
+        for key, value in dict(k_errors="0;20", t_errors="0", l_errors="0").items():
+            page.absorber_sensitivity.fields[key].set(value)
+        app._show_page("identification")
+        return page
+
+    def test_absorber_error_workflow_roundtrip_exports_and_atomic_import(self):
+        import json
+        from app.identification import validate_experiment_state
+        from app.absorber_sensitivity_exporting import write_report
+        from app.exporting import write_experiment_csv, write_experiment_report
+        page = self.prepare_absorber_errors(); s = page.absorber_sensitivity
+        s.start(); self.wait_for_task()
+        self.assertIsNotNone(s.result, page.summary.get())
+        self.assertTrue(page.result_current)
+        s.selected.set(s.box["values"][1]); page.draw()
+        self.app._set_chart_mode("both"); self.root.update()
+        self.assertEqual(len(self.app.chart_panes.panes()), 2)
+        self.assertEqual(len(self.app.response_axis.lines), 4)
+        for axis, canvas in ((self.app.disturbance_axis, self.app.disturbance_canvas), (self.app.response_axis, self.app.response_canvas)):
+            canvas.draw(); box = axis.get_legend().get_window_extent(canvas.get_renderer())
+            self.assertGreaterEqual(box.y0, axis.figure.bbox.y0-1)
+            self.assertLessEqual(box.y1, axis.figure.bbox.y1+1)
+        snapshot = page.capture()
+        for fmt in ("csv", "html", "pdf"):
+            path = Path(self.directory.name)/f"absorber-errors.{fmt}"
+            write_report(path, s.result, s.index(), fmt)
+            self.assertGreater(path.stat().st_size, 1000)
+        for fmt in ("html", "pdf"):
+            write_experiment_report(Path(self.directory.name)/f"full.{fmt}", snapshot, fmt)
+        write_experiment_csv(Path(self.directory.name)/"full.csv", snapshot)
+        session = Path(self.directory.name)/"absorber.json"
+        with patch("main.filedialog.asksaveasfilename", return_value=str(session)): self.app._save_comparison_session()
+        page.restore(None)
+        with patch("main.filedialog.askopenfilename", return_value=str(session)): self.app._open_comparison_session()
+        self.assertEqual(page.capture(), snapshot)
+        old = copy.deepcopy(snapshot); old.pop("absorber_sensitivity"); old["view"] = "Отклик"
+        self.assertIsNone(validate_experiment_state(old)["absorber_sensitivity"]["result"])
+        for key in ("metrics", "input_state", "origin", "selected"):
+            bad = json.loads(session.read_text(encoding="utf-8"))
+            block = bad["laboratory"]["identification"]["absorber_sensitivity"]
+            if key == "metrics": block["result"]["cases"][0]["metrics"]["iae"] = 0.
+            if key == "input_state": block["result"]["input_state"]["time_constant"] = "12"
+            if key == "origin": block["result"]["origin"]["parameters"]["gain"] = 99.
+            if key == "selected": block["selected"] = 99
+            session.write_text(json.dumps(bad), encoding="utf-8")
+            with patch("main.filedialog.askopenfilename", return_value=str(session)): self.app._open_comparison_session()
+            self.assertEqual(page.capture(), snapshot)
+        s.fields["iae"].set("2")
+        self.assertTrue(page.result_current)
+        self.assertIn("Снимок прежних", s.summary.get())
+        s.fields["iae"].set(snapshot["absorber_sensitivity"]["fields"]["iae"])
+        self.app.time_constant.set("9")
+        self.assertTrue(s.capture()["stale"])
+        stale_report = Path(self.directory.name)/"stale.html"
+        write_experiment_report(stale_report, page.capture(), "html")
+        self.assertIn("Снимок прежних данных или настроек", stale_report.read_text(encoding="utf-8"))
+        self.assertFalse(self.app.signal_mode_box.winfo_manager())
+
+    def test_absorber_requirement_edit_cancels_worker_and_sign_roles_checked(self):
+        from threading import Event
+        page = self.prepare_absorber_errors(); s = page.absorber_sensitivity
+        accepted = []; gate = Event()
+        self.app._start_task("Проверка", lambda cancel, progress: gate.wait(2), accepted.append, "identification")
+        task = self.app._task
+        s.fields["iae"].set("2")
+        self.assertTrue(task.cancel.is_set()); self.assertTrue(page.result_current)
+        gate.set(); task.thread.join(3); self.root.update()
+        self.assertEqual(accepted, [])
+        page.metadata["output_role"].set("Xог, доля")
+        page.calculate(); self.wait_for_task()
+        s.start()
+        self.assertIsNone(self.app._task)
+        self.assertIn("Выход CSV", page.summary.get())
+
     def test_identification_errors_workflow_old_sessions_and_atomic_import(self):
         from app.tank_state import validate_tank_state
         from app.tank_sensitivity_exporting import write_report
