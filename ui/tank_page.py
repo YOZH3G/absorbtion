@@ -14,6 +14,7 @@ from app.tank_state import FIELD_DEFAULTS, VIEWS, validate_tank_state
 from app.identification import identify_step, read_experiment
 from app.experiment_control import validate_step
 from app.tank_exporting import STATUS_TEXT, EVENT_TEXT
+from ui.tank_sensitivity import TankSensitivity, VIEW as SENSITIVITY_VIEW
 
 
 class TankPage(ttk.Frame):
@@ -71,7 +72,10 @@ class TankPage(ttk.Frame):
                           ("title","Название опыта"),("prediction","Прогноз"),("conclusion","Вывод")):
             ttk.Label(self,text=label,style="Body.TLabel").grid(row=row,column=0,sticky="w")
             ttk.Entry(self,textvariable=self.fields[key]).grid(row=row,column=1,sticky="ew"); row+=1
-        for text,command in (("Сравнить PI и рабочие уровни",self.check_pi),("Сохранить эксперимент CSV",self.export_experiment),
+        ttk.Button(self,text="Сравнить PI и рабочие уровни",command=self.check_pi).grid(row=row,column=0,columnspan=2,sticky="ew",pady=3); row+=1
+        self.sensitivity = TankSensitivity(self)
+        self.sensitivity.grid(row=row,column=0,columnspan=2,sticky="ew",pady=8); row+=1
+        for text,command in (("Сохранить эксперимент CSV",self.export_experiment),
                              ("Сохранить результаты CSV",lambda:self.export("csv")),("Протокол HTML",lambda:self.export("html")),
                              ("Протокол PDF",lambda:self.export("pdf")),("Сохранить сеанс JSON",app._save_comparison_session),
                              ("Открыть сеанс JSON",app._open_comparison_session)):
@@ -84,7 +88,7 @@ class TankPage(ttk.Frame):
         self.initial_entry.configure(state="disabled")
 
     def signature(self):
-        return (self.revision,tuple(v.get() for v in self.fields.values()),tuple(v.get() for v in self.columns),tuple(v.get() for v in self.units),self.delimiter.get())
+        return (self.revision,tuple(v.get() for v in self.fields.values()),tuple(v.get() for v in self.columns),tuple(v.get() for v in self.units),self.delimiter.get(),self.sensitivity.configuration())
 
     def changed(self,*_):
         if self.restoring: return
@@ -241,6 +245,8 @@ class TankPage(ttk.Frame):
     def draw(self):
         if getattr(self.app,"current_page",None) != "tank": return
         app=self.app; app._remove_controller_axis(); app._remove_map_colorbar(); app._clear_map_click_callback()
+        if self.view.get() == SENSITIVITY_VIEW:
+            self.sensitivity.draw(); return
         app._style_axis(app.disturbance_axis,"Время, с","Расход, м³/с")
         app._style_axis(app.response_axis,"Время, с","Уровень, м")
         view=self.view.get(); record=self.pi if view=="PI" else self.fit if view in ("Идентификация","Остаток") else self.validation if view=="Проверка" else self.result
@@ -292,7 +298,9 @@ class TankPage(ttk.Frame):
         return copy.deepcopy(dict(model_id=MODEL_ID,model_version=MODEL_VERSION,fields={k:v.get() for k,v in self.fields.items()},
             revision=self.revision,view=self.view.get(),headers=self.headers,rows=self.rows,source=self.source,
             columns=[v.get() for v in self.columns],units=[v.get() for v in self.units],delimiter=self.delimiter.get(),same_signals=self.same_signals.get(),
-            result=self.result,fit=self.fit,validation=self.validation,pi=self.pi))
+            result=self.result,fit=self.fit,validation=self.validation,pi=self.pi,
+            sensitivity_fields={k:v.get() for k,v in self.sensitivity.fields.items()},
+            sensitivity=self.sensitivity.result,selected_sensitivity=self.sensitivity.index()))
 
     def restore(self,state):
         state=validate_tank_state(state)
@@ -307,6 +315,7 @@ class TankPage(ttk.Frame):
             for i,var in enumerate(self.units): var.set(("с","м³/с","м")[i] if state is None else state["units"][i])
             self.delimiter.set(";" if state is None else state["delimiter"])
             self.same_signals.set(False if state is None else state["same_signals"])
+            self.sensitivity.restore(state)
             self.view.set(VIEWS[0] if state is None else state["view"])
         finally: self.restoring=False
         self.initial_entry.configure(state="disabled" if self.fields["mode"].get()=="Равновесие" else "normal")

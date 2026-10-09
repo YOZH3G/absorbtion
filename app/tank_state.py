@@ -9,7 +9,7 @@ from .tank import DEFAULTS, MODEL_ID, MODEL_VERSION, SIGNAL_UNITS, validate_inpu
 FIELD_DEFAULTS = {k: str(v) for k, v in DEFAULTS.items()}
 FIELD_DEFAULTS.update(mode="Равновесие", setpoint="1.4", gain="0.015", integral_time="200",
                       noise="0", seed="42", title="Опыт с баком", prediction="", conclusion="")
-VIEWS = ("Свободный отклик", "Идентификация", "Остаток", "Проверка", "PI")
+VIEWS = ("Свободный отклик", "Идентификация", "Остаток", "Проверка", "PI", "Ошибки идентификации")
 
 
 def signals(record, names, minimum=2):
@@ -169,4 +169,38 @@ def validate_tank_state(state):
             if not isinstance(record.get("origin"),dict):
                 raise ValueError("Бак: нет источника настроек PI.")
             validate_origin(record["origin"])
+    from .tank_sensitivity import FIELD_DEFAULTS as SENSITIVITY_DEFAULTS, validate_result
+    state.setdefault("sensitivity_fields", dict(SENSITIVITY_DEFAULTS))
+    state.setdefault("sensitivity", None)
+    state.setdefault("selected_sensitivity", 0)
+    sensitivity_fields = state["sensitivity_fields"]
+    if (not isinstance(sensitivity_fields, dict) or set(sensitivity_fields) != set(SENSITIVITY_DEFAULTS)
+            or any(not isinstance(v, str) for v in sensitivity_fields.values())):
+        raise ValueError("Бак: неверные поля ошибок идентификации.")
+    selected = state["selected_sensitivity"]
+    result = state["sensitivity"]
+    if type(selected) is not int or selected < 0 or (result is None and selected != 0):
+        raise ValueError("Бак: неверный выбранный опыт чувствительности.")
+    if result is not None:
+        validate_result(result)
+        if type(result.get("revision")) is not int or not 0 <= result["revision"] <= revision or selected >= len(result["cases"]):
+            raise ValueError("Бак: неверный снимок ошибок идентификации.")
+        validate_origin(result.get("origin"))
+        if result["origin"]["revision"] != result["revision"]:
+            raise ValueError("Бак: источник не соответствует версии опыта ошибок.")
+        configuration = result.get("configuration")
+        from .tank_sensitivity import parse_fields
+        if (not isinstance(configuration, dict) or set(configuration) != {"fields", "controller"}
+                or not isinstance(configuration["controller"], dict) or set(configuration["controller"]) != {"gain", "integral_time", "setpoint"}
+                or any(not isinstance(v, str) for v in configuration["controller"].values())):
+            raise ValueError("Бак: неполная конфигурация ошибок идентификации.")
+        grid, requirements = parse_fields(configuration["fields"])
+        if grid != result["grid"] or requirements != result["requirements"]:
+            raise ValueError("Бак: сетка не соответствует конфигурации.")
+        try:
+            controller = {k: float(v.replace(",", ".")) for k, v in configuration["controller"].items()}
+        except ValueError as error:
+            raise ValueError("Бак: неверный исходный PI в снимке.") from error
+        if controller != result["controls"][0]["run"]["controller"]:
+            raise ValueError("Бак: исходный PI не соответствует конфигурации.")
     return state

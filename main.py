@@ -12,7 +12,7 @@ from matplotlib.colors import ListedColormap
 from matplotlib.figure import Figure
 
 APP_NAME = "Лаборатория динамики и управления"
-APP_VERSION = "1.8.0"
+APP_VERSION = "1.9.0"
 
 from app.calculations import (
     CONTROLLER_TYPES,
@@ -4111,6 +4111,15 @@ def _run_release_check(output_path):
             tank.generate(); wait_tank()
             tank.identify(); wait_tank()
             tank.check_pi(); wait_tank()
+            for key, value in dict(k_errors="0;20", t_errors="0", l_errors="0").items():
+                tank.sensitivity.fields[key].set(value)
+            tank.sensitivity.start(); wait_tank()
+            if tank.sensitivity.result is None or len(tank.sensitivity.result["cases"]) != 2:
+                raise RuntimeError(tank.summary.get())
+            from app.tank_sensitivity_exporting import write_report
+            for extension in ("csv", "html", "pdf"):
+                write_report(Path(directory)/f"tank-errors.{extension}", tank.sensitivity.result, 1, extension)
+            report["identification_errors_verified"] = True
             if tank.fit is None or tank.pi is None or len(tank.pi["cases"]) != 8:
                 raise RuntimeError(tank.summary.get())
             from app.tank import DEFAULTS, simulate

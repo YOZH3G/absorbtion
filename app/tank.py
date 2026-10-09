@@ -160,24 +160,28 @@ def simulate(values, *, controller=None, local_model=None, cancel=None, progress
         result["prediction"] = forecast
         result["local_model"] = {n: float(local_model[n]) for n in ("gain", "time_constant", "delay")}
     if controller is not None:
-        error = setpoint-np.asarray(level)
-        span = abs(setpoint-p["initial_level"])
-        outside = np.flatnonzero(abs(error) > max(.05*span, 1e-8))
-        at = int(outside[-1]+1) if outside.size else 0
-        local_t = 2*p["area"]*math.sqrt(p["initial_level"])/p["coefficient"]
-        settled = time[at] if at < len(time) and time[-1]-time[at] >= local_t else None
-        reachable = all(p["coefficient"]*math.sqrt(setpoint)+d <= p["pump_limit"] for d in withdrawal)
-        if event or not reachable:
-            settled = None
-        result["error"] = error.tolist()
-        result["metrics"] = dict(final_error=float(error[-1]), iae=float(np.trapezoid(abs(error), time)),
-            overshoot_percent=float(max(0., np.max(np.sign(setpoint-p["initial_level"])*(np.asarray(level)-setpoint)))*100/span) if span > 1e-12 else 0.,
-            settling_time=settled, saturation_duration=float(saturation), reachable=bool(reachable),
-            status="physical_stop" if event else "unreachable" if not reachable else "settled" if settled is not None else "horizon")
+        result["error"] = (setpoint-np.asarray(level)).tolist()
+        result["metrics"] = pi_metrics(p, time, level, withdrawal, event, setpoint, saturation)
     check_cancelled(cancel)
     if progress:
         progress(1.)
     return result
+
+
+def pi_metrics(p, time, level, withdrawal, event, setpoint, saturation):
+    error = setpoint-np.asarray(level)
+    span = abs(setpoint-p["initial_level"])
+    outside = np.flatnonzero(abs(error) > max(.05*span, 1e-8))
+    at = int(outside[-1]+1) if outside.size else 0
+    local_t = 2*p["area"]*math.sqrt(p["initial_level"])/p["coefficient"]
+    settled = time[at] if at < len(time) and time[-1]-time[at] >= local_t else None
+    reachable = all(p["coefficient"]*math.sqrt(setpoint)+d <= p["pump_limit"] for d in withdrawal)
+    if event or not reachable:
+        settled = None
+    return dict(final_error=float(error[-1]), iae=float(np.trapezoid(abs(error), time)),
+        overshoot_percent=float(max(0., np.max(np.sign(setpoint-p["initial_level"])*(np.asarray(level)-setpoint)))*100/span) if span > 1e-12 else 0.,
+        settling_time=settled, saturation_duration=float(saturation), reachable=bool(reachable),
+        status="physical_stop" if event else "unreachable" if not reachable else "settled" if settled is not None else "horizon")
 
 
 def compare_regimes(values, local_model, gain, integral_time, setpoint, *, cancel=None, progress=None):

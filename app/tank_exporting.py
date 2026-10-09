@@ -43,6 +43,10 @@ def write_tank_report(path,state,format_name):
         for r in state["pi"]["cases"]: series.append((r["name"],r,"level","pump"))
     if not series: raise ValueError("Сначала рассчитайте бак или идентифицируйте эксперимент.")
     if format_name=="csv":
+        if state["sensitivity"] is not None:
+            from .tank_sensitivity_exporting import case_label
+            for case in [*state["sensitivity"]["controls"], *state["sensitivity"]["cases"]]:
+                series.append(("Ошибки оценки: "+case_label(case),case["run"],"level","pump"))
         with open(path,"w",encoding="utf-8-sig",newline="") as stream:
             writer=csv.writer(stream,delimiter=";")
             writer.writerow(("Опыт","Время, с","Подача, м³/с","Уровень, м","Модель или прогноз, м","Отбор, м³/с"))
@@ -82,6 +86,13 @@ def write_tank_report(path,state,format_name):
         for axis,ylabel in zip(axes,("Расход, м³/с","Уровень, м")):
             axis.set_xlabel("Время, с"); axis.set_ylabel(ylabel); axis.grid(alpha=.2); axis.legend()
         figure.suptitle(label); figures.append(figure)
+    if state["sensitivity"] is not None:
+        from .tank_sensitivity_exporting import report_parts
+        snapshot = dict(state["sensitivity"])
+        snapshot["exported_stale"] = (snapshot["revision"] != state["revision"]
+            or snapshot["configuration"] != dict(fields=state["sensitivity_fields"],controller={k:state["fields"][k] for k in ("gain","integral_time","setpoint")}))
+        extra_sections, extra_figures = report_parts(snapshot,state["selected_sensitivity"])
+        sections.extend(extra_sections); figures.extend(extra_figures)
     if format_name=="pdf": return _write_pdf(path,[*_text_pages(title,sections),*figures])
     if format_name!="html": raise ValueError("Поддерживаются CSV, HTML и PDF.")
     markup="".join(f"<h2>{html.escape(name)}</h2><pre>{html.escape(text)}</pre>" for name,text in sections)

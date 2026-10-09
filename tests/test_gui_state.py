@@ -15,6 +15,71 @@ from ui.scenario_editor import ScenarioEditorDialog
 
 
 class GuiStateTests(unittest.TestCase):
+    def test_identification_errors_workflow_old_sessions_and_atomic_import(self):
+        from app.tank_state import validate_tank_state
+        from app.tank_sensitivity_exporting import write_report
+        app, page = self.app, self.app.tank_page
+        app._show_page("tank")
+        page.generate(); self.wait_for_task()
+        page.identify(); self.wait_for_task()
+        for key, value in dict(k_errors="0;20", t_errors="0", l_errors="0").items():
+            page.sensitivity.fields[key].set(value)
+        revision = page.revision
+        page.sensitivity.start(); self.wait_for_task()
+        self.assertIsNotNone(page.sensitivity.result)
+        self.assertEqual(page.revision, revision)
+        page.sensitivity.selected.set(page.sensitivity.box["values"][1]); page.draw()
+        app._set_chart_mode("both"); self.root.update()
+        self.assertEqual(len(app.chart_panes.panes()), 2)
+        self.assertEqual(len(app.response_axis.lines), 4)
+        for axis, canvas in ((app.disturbance_axis, app.disturbance_canvas),(app.response_axis,app.response_canvas)):
+            canvas.draw(); renderer = canvas.get_renderer()
+            box = axis.get_legend().get_window_extent(renderer)
+            self.assertGreaterEqual(box.y0, axis.figure.bbox.y0)
+            self.assertLessEqual(box.y1, axis.figure.bbox.y1+1)
+        snapshot = page.capture()
+        validate_tank_state(snapshot)
+        for fmt in ("csv", "html", "pdf"):
+            path = Path(self.directory.name)/f"errors.{fmt}"
+            write_report(path, snapshot["sensitivity"], 1, fmt)
+            self.assertGreater(path.stat().st_size, 1000)
+        session = Path(self.directory.name)/"errors.json"
+        with patch("main.filedialog.asksaveasfilename", return_value=str(session)): app._save_comparison_session()
+        page.restore(None)
+        with patch("main.filedialog.askopenfilename", return_value=str(session)): app._open_comparison_session()
+        self.assertEqual(page.capture(), snapshot)
+        old = copy.deepcopy(snapshot)
+        for key in ("sensitivity_fields", "sensitivity", "selected_sensitivity"): old.pop(key)
+        old["view"] = "PI"
+        restored = validate_tank_state(old)
+        self.assertIsNone(restored["sensitivity"])
+        self.assertEqual(restored["selected_sensitivity"], 0)
+        import json
+        payload = json.loads(session.read_text(encoding="utf-8"))
+        payload["laboratory"]["tank"]["sensitivity"]["cases"][0]["run"]["metrics"]["iae"] = 0.
+        session.write_text(json.dumps(payload), encoding="utf-8")
+        with patch("main.filedialog.askopenfilename", return_value=str(session)): app._open_comparison_session()
+        self.assertEqual(page.capture(), snapshot)
+        page.sensitivity.fields["iae"].set("200")
+        self.assertEqual(page.revision, revision)
+        self.assertIn("Снимок прежних настроек", page.sensitivity.summary.get())
+
+    def test_editing_error_requirements_cancels_task_without_invalidating_fit(self):
+        from threading import Event
+        app, page = self.app, self.app.tank_page
+        app._show_page("tank")
+        started, release = Event(), Event()
+        accepted = []
+        def slow(cancel, progress):
+            started.set(); release.wait(2); return "late"
+        page.perform("Ошибки идентификации", slow, accepted.append)
+        self.assertTrue(started.wait(1))
+        revision = page.revision
+        page.sensitivity.fields["iae"].set("200")
+        release.set(); self.wait_for_task()
+        self.assertEqual(accepted, [])
+        self.assertEqual(page.revision, revision)
+
     def test_common_model_results_restore_and_reject_corrupt_snapshot(self):
         import numpy as np
         from app.physical_models import MODELS
