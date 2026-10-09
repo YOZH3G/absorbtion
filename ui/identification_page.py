@@ -7,7 +7,7 @@ import numpy as np
 from pathlib import Path
 from tkinter import filedialog, ttk
 
-from app.identification import experiment_columns, export_identification, identify_step, read_experiment, validate_experiment_state
+from app.identification import experiment_columns, export_identification, identify_step, read_experiment, validate_experiment_state, quality_text
 from app.experiment_control import validate_step, compare_pi
 from .absorber_sensitivity import AbsorberSensitivity, VIEW as ABSORBER_VIEW
 
@@ -111,14 +111,14 @@ class IdentificationPage(ttk.Frame):
             return
         if self.view.get() == "Проверка" and self.validation is not None:
             r = self.validation
-            self.summary.set(f"Независимая проверка: {r['source']}; RMSE={r['rmse']:.5g}; ошибка {r['normalized_rmse']*100:.3g}%. K/T/L не изменялись. {r['warning']}")
+            self.summary.set(f"Независимая проверка: {r['source']}; RMSE всей записи={r['rmse']:.5g}; ошибка {r['normalized_rmse']*100:.3g}%. K/T/L не изменялись. {r['warning']}\n" + quality_text(r))
         elif self.view.get() == "Регулирование" and self.pi_result is not None:
             self.summary.set("\n".join(f"{r['name']}: Kp={r['gain']:.5g}; Ti={r['integral_time']:.5g}; ошибка={r['metrics']['final_error']:.5g}; перерегулирование={r['metrics']['overshoot_percent']:.3g}%; IAE={r['metrics']['iae']:.5g}; установление={settling_text(r['metrics']['settling_time'])}; насыщение={r['metrics']['saturation_duration']:.3g} с."
                 + (" Задание недостижимо." if not r['metrics']['reachable'] else "")
                 + (" Выход вне диапазона 0…1." if r['metrics'].get('output_out_of_range') else "") for r in self.pi_result["runs"]))
         else:
             r = self.result
-            self.summary.set(f"K={r['gain']:.6g}; T={r['time_constant']:.6g} с; L={r['delay']:.6g} с. RMSE={r['rmse']:.5g}. Оценена подгонка к {r['source']}.")
+            self.summary.set(f"K={r['gain']:.6g}; T={r['time_constant']:.6g} с; L={r['delay']:.6g} с. RMSE всей записи={r['rmse']:.5g}. Оценена подгонка к {r['source']}.\n" + quality_text(r))
         self.draw()
 
     def changed(self, *_):
@@ -168,8 +168,8 @@ class IdentificationPage(ttk.Frame):
         self.result.setdefault("origin", self.origin())
         self.result_current = True
         self.summary.set(f"K = {result['gain']:.6g}; T = {result['time_constant']:.6g} с; L = {result['delay']:.6g} с. "
-                         f"RMSE = {result['rmse']:.5g}; ошибка {result['normalized_rmse'] * 100:.3g}% амплитуды. "
-                         f"{result['source']}. Время ступени определено внутри интервала {result['step_interval'][0]:g}–{result['step_interval'][1]:g} с. Оценена только подгонка к исходному эксперименту.")
+                         f"RMSE всей записи = {result['rmse']:.5g}; ошибка {result['normalized_rmse'] * 100:.3g}% амплитуды. "
+                         f"{result['source']}. Время ступени определено внутри интервала {result['step_interval'][0]:g}–{result['step_interval'][1]:g} с. Оценена только подгонка к исходному эксперименту.\n" + quality_text(result))
         self.apply_button.configure(state="normal")
         for button in self.export_buttons:
             button.configure(state="normal")
@@ -206,7 +206,7 @@ class IdentificationPage(ttk.Frame):
     def accept_validation(self, result):
         self.validation = result
         self.view.set("Проверка")
-        self.summary.set(f"Независимая проверка: {result['source']}; RMSE={result['rmse']:.5g}; ошибка {result['normalized_rmse']*100:.3g}%. K/T/L не изменялись. {result['warning']}")
+        self.summary.set(f"Независимая проверка: {result['source']}; RMSE всей записи={result['rmse']:.5g}; ошибка {result['normalized_rmse']*100:.3g}%. K/T/L не изменялись. {result['warning']}\n" + quality_text(result))
         self.draw()
         self.app._set_status("Независимая проверка выполнена")
 

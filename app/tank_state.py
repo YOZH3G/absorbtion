@@ -152,6 +152,8 @@ def validate_tank_state(state):
             if not isinstance(record.get("source"),str) or not isinstance(record.get("origin"),dict):
                 raise ValueError("Бак: нет источника идентификации.")
             validate_origin(record["origin"])
+            from .identification import validate_step_quality
+            validate_step_quality(record)
         else:
             configuration=record.get("configuration")
             if (not isinstance(configuration,dict) or set(configuration) != {"gain","integral_time","setpoint"}

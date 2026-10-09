@@ -7,7 +7,7 @@ from threading import Event
 import numpy as np
 
 from app.background_tasks import CalculationCancelled
-from app.identification import experiment_columns, export_identification, identify_step, read_experiment
+from app.identification import experiment_columns, export_identification, identify_step, read_experiment, validate_step_quality
 
 
 def experiment(constant=8., delay=2., gain=.4, irregular=False):
@@ -20,6 +20,26 @@ def experiment(constant=8., delay=2., gain=.4, irregular=False):
 
 
 class IdentificationTests(unittest.TestCase):
+    def test_quality_roundtrip_and_tampered_diagnostics(self):
+        import copy
+        import json
+        result = identify_step(*experiment(irregular=True))
+        record = {k: v.tolist() if isinstance(v, np.ndarray) else v for k, v in result.items()}
+        restored = json.loads(json.dumps(record))
+        validate_step_quality(restored)
+        residual = np.asarray(result["residual"])
+        expected = np.sqrt(np.trapezoid(residual**2, result["time"])/np.ptp(result["time"]))
+        self.assertAlmostEqual(result["rmse"], expected, places=14)
+        for key in ("quality", "model", "rmse", "amplitude"):
+            bad = copy.deepcopy(restored)
+            if key == "quality": bad[key]["response_rmse"] = 1
+            elif key == "model": bad[key][-1] += .01
+            else: bad[key] += .01
+            with self.assertRaisesRegex(ValueError, "качества"):
+                validate_step_quality(bad)
+        old = copy.deepcopy(restored); old.pop("quality")
+        validate_step_quality(old)
+
     def test_reference_parameters_including_negative_gain_and_irregular_times(self):
         for constant, delay, gain, irregular in ((8, 2, .4, False), (12, 3.7, 2, False),
                                                (8, 0, -1.5, False), (3, 1.3, .4, True)):

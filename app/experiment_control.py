@@ -6,6 +6,7 @@ import numpy as np
 from .background_tasks import check_cancelled
 from .calculations import tune_controller_parameters
 from .pi_control import pi_update
+from .identification import step_quality
 
 
 def validate_step(time, signal, output, parameters, *, cancel=None):
@@ -39,18 +40,26 @@ def validate_step(time, signal, output, parameters, *, cancel=None):
         raise ValueError("Проверочная запись слишком короткая: нужны три T после запаздывания.")
     response = -np.expm1(-np.maximum(time - time[index] - delay, 0) / constant)
     transition = time[(response >= .1) & (response <= .9)]
-    if transition.size < 5 or constant < 2 * np.median(np.diff(transition)):
+    lower, upper = time[index] + delay - constant * np.log(.9), time[index] + delay - constant * np.log(.1)
+    gaps = np.diff(time)[(time[:-1] < upper) & (time[1:] > lower)]
+    if transition.size < 5 or constant < 2 * np.max(gaps):
         raise ValueError("Измерения проверочной записи слишком редкие.")
     baseline = float(np.mean(base))
     model = baseline + gain * amplitude * -np.expm1(-np.maximum(time - time[index] - delay, 0) / constant)
     residual = output - model
     rmse = float(np.sqrt(np.trapezoid(residual**2, time) / np.ptp(time)))
+    quality = step_quality(time, signal, output, model, gain, constant, delay, float(time[index]))
+    warnings = []
+    if not quality["error_acceptable"]:
+        warnings.append("Ошибка отклика выше 10% ожидаемой амплитуды.")
+    if not quality["noise_adequate"]:
+        warnings.append("Ожидаемая амплитуда недостаточна относительно шума исходного режима.")
     check_cancelled(cancel)
     return dict(time=time.tolist(), input=signal.tolist(), output=output.tolist(), model=model.tolist(),
                 residual=residual.tolist(), gain=gain, time_constant=constant, delay=delay,
                 baseline=baseline, step_time=float(time[index]), rmse=rmse,
                 normalized_rmse=rmse / abs(gain * amplitude),
-                warning="Ошибка выше 10% ожидаемого отклика." if rmse > .1 * abs(gain * amplitude) else "",
+                quality=quality, warning=" ".join(warnings),
                 method="independent fixed-parameter step validation")
 
 

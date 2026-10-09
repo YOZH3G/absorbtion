@@ -6,7 +6,7 @@ from unittest.mock import patch
 import numpy as np
 
 from app.experiment_control import compare_pi, validate_step
-from app.identification import identify_step
+from app.identification import identify_step, validate_step_quality
 
 
 def reference(gain=.4):
@@ -17,6 +17,41 @@ def reference(gain=.4):
 
 
 class ExperimentControlTests(unittest.TestCase):
+    def test_long_baseline_cannot_hide_absent_response(self):
+        time = np.r_[np.linspace(0, 9999, 101), np.linspace(10000, 10080, 401)]
+        signal = np.where(time < 10000, .3, .5)
+        record = validate_step(time, signal, np.full_like(time, .2),
+                               dict(gain=.4, time_constant=8, delay=2))
+        self.assertLess(record["normalized_rmse"], .1)
+        self.assertGreater(record["quality"]["response_normalized_rmse"], .8)
+        self.assertFalse(record["quality"]["error_acceptable"])
+        self.assertIn("Ошибка отклика", record["warning"])
+
+    def test_clustered_samples_cannot_hide_transition_gap(self):
+        time = np.r_[np.linspace(0, 10, 51), np.linspace(13, 14, 11), np.linspace(40, 80, 41)]
+        signal = np.where(time < 10, .3, .5)
+        output = .2 + .08 * -np.expm1(-np.maximum(time-12, 0)/8)
+        with self.assertRaisesRegex(ValueError, "редкие"):
+            validate_step(time, signal, output, dict(gain=.4, time_constant=8, delay=2))
+
+    def test_quality_zero_noise_bias_and_irregular_time(self):
+        time = np.r_[np.linspace(0, 10, 51), np.linspace(10.2, 80, 287)]
+        signal = np.where(time < 10, .3, .5)
+        output = .2 + .08 * -np.expm1(-np.maximum(time-12, 0)/8)
+        parameters = dict(gain=.4, time_constant=8, delay=2)
+        exact = validate_step(time, signal, output, parameters)
+        self.assertLess(exact["quality"]["response_rmse"], 1e-12)
+        self.assertTrue(exact["quality"]["noise_adequate"])
+        self.assertGreater(exact["quality"]["duration_T"], 3)
+        validate_step_quality(exact)
+        for key in ("rmse", "normalized_rmse", "gain", "baseline", "delay"):
+            with self.assertRaises(ValueError):
+                validate_step_quality(exact | {key: False})
+        biased = validate_step(time, signal, output + .02*(time>=10), parameters)
+        self.assertAlmostEqual(biased["quality"]["response_bias"], .02, places=12)
+        self.assertAlmostEqual(biased["quality"]["response_rmse"], .02, places=12)
+        self.assertFalse(biased["quality"]["error_acceptable"])
+
     def test_unresolved_validation_and_malformed_time_are_rejected(self):
         fit = reference()
         time = np.r_[np.linspace(0, 10, 51), 10.2, 45, np.linspace(45.2, 120, 201)]

@@ -12,7 +12,7 @@ from matplotlib.colors import ListedColormap
 from matplotlib.figure import Figure
 
 APP_NAME = "Лаборатория динамики и управления"
-APP_VERSION = "1.10.0"
+APP_VERSION = "1.11.0"
 
 from app.calculations import (
     CONTROLLER_TYPES,
@@ -4103,6 +4103,15 @@ def _run_release_check(output_path):
             validation_output = .3 + fitted["gain"]*.5*-np.expm1(-np.maximum(validation_time-15-fitted["delay"], 0)/fitted["time_constant"])
             page.accept_validation(dict(validate_step(validation_time, validation_input, validation_output, fitted),
                                         source="release-validation.csv", origin=page.origin()))
+            if (not page.validation["quality"]["error_acceptable"]
+                    or "RMSE отклика" not in page.summary.get()):
+                raise RuntimeError("Показатели качества независимой проверки не подтверждены.")
+            no_response_time = np.r_[np.linspace(0, 9999, 101), np.linspace(10000, 10080, 401)]
+            no_response = validate_step(no_response_time, np.where(no_response_time < 10000, .3, .5),
+                                        np.full_like(no_response_time, .2), dict(gain=.4, time_constant=8, delay=2))
+            if no_response["quality"]["error_acceptable"] or not no_response["warning"]:
+                raise RuntimeError("Длинный исходный участок скрыл отсутствие отклика.")
+            report["identification_quality_verified"] = True
             app.chain = RICH_ABSORBENT
             app.controller_enabled.set(True); app.controller_type.set("PI")
             app.setpoint.set("30.5"); app.control_limit.set("20")

@@ -15,6 +15,25 @@ from ui.scenario_editor import ScenarioEditorDialog
 
 
 class GuiStateTests(unittest.TestCase):
+    def test_identification_quality_is_visible_saved_and_checked(self):
+        from app.identification import validate_experiment_state
+        from app.exporting import write_experiment_report
+        page = self.prepare_absorber_errors()
+        self.assertIn("RMSE отклика", page.summary.get())
+        self.assertIn("максимальный интервал", page.summary.get())
+        snapshot = page.capture()
+        page.restore(None); page.restore(snapshot)
+        self.assertEqual(page.result["quality"], snapshot["result"]["quality"])
+        bad = copy.deepcopy(snapshot); bad["result"]["quality"]["error_acceptable"] = False
+        with self.assertRaises(ValueError): validate_experiment_state(bad)
+        old = copy.deepcopy(snapshot); old["result"].pop("quality")
+        page.restore(old)
+        self.assertIn("старом результате", page.summary.get())
+        page.restore(snapshot)
+        path = Path(self.directory.name)/"quality.html"
+        write_experiment_report(path, snapshot, "html")
+        self.assertIn("RMSE отклика", path.read_text(encoding="utf-8"))
+
     def prepare_absorber_errors(self):
         app, page = self.app, self.app.identification_page
         app._show_page("identification")

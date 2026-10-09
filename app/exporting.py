@@ -16,7 +16,7 @@ from .plotting import adaptive_legend
 
 def write_experiment_report(path, state, format_name):
     """Export fit, independent validation and controller snapshots together."""
-    from .identification import validate_experiment_state
+    from .identification import validate_experiment_state, quality_text
     state = validate_experiment_state(state)
     fit = state["result"]
     if fit is None:
@@ -29,8 +29,8 @@ def write_experiment_report(path, state, format_name):
                     f"Единицы: {fit['units']}", f"Версия данных подгонки: {fit.get('origin', {}).get('data_revision', 0)}",
                     "Результат актуален." if state["result_current"] else "Результат относится к прежнему выбору данных."]),
                 ("Подгонка", [f"K={fit['gain']:.8g}; T={fit['time_constant']:.8g} с; L={fit['delay']:.8g} с",
-                    f"RMSE={fit['rmse']:.8g}; относительная ошибка={fit['normalized_rmse']*100:.6g}%",
-                    "Подгонка к одной ступени не подтверждает модель за пределами исходного режима."])]
+                    f"RMSE всей записи={fit['rmse']:.8g}; относительная ошибка={fit['normalized_rmse']*100:.6g}%",
+                    "Подгонка к одной ступени не подтверждает модель за пределами исходного режима.", quality_text(fit)])]
     figures = []
     figure = Figure(figsize=(9, 8))
     axes = figure.subplots(3, 1)
@@ -47,9 +47,9 @@ def write_experiment_report(path, state, format_name):
     else:
         sections.append(("Независимая проверка", [f"Источник: {validation['source']}",
             f"K={validation['gain']:.8g}; T={validation['time_constant']:.8g}; L={validation['delay']:.8g}",
-            f"RMSE={validation['rmse']:.8g}; ошибка={validation['normalized_rmse']*100:.6g}%",
+            f"RMSE всей записи={validation['rmse']:.8g}; ошибка={validation['normalized_rmse']*100:.6g}%",
             f"Версия идентификации: {validation['origin']['result_revision']}", validation["warning"],
-            "Параметры зафиксированы до загрузки проверочной записи."]))
+            "Параметры зафиксированы до загрузки проверочной записи.", quality_text(validation)]))
         figure = Figure(figsize=(9, 8))
         axes = figure.subplots(3, 1)
         for axis, label in zip(axes, ("Вход, приведённые единицы", "Выход, приведённые единицы", "Остаток")):

@@ -11,7 +11,7 @@ import numpy as np
 from app.tank import DEFAULTS, MODEL_ID, MODEL_VERSION, equilibrium, compare_regimes, validate_inputs
 from app.physical_models import MODELS, run_model
 from app.tank_state import FIELD_DEFAULTS, VIEWS, validate_tank_state
-from app.identification import identify_step, read_experiment
+from app.identification import identify_step, read_experiment, quality_text
 from app.experiment_control import validate_step
 from app.tank_exporting import STATUS_TEXT, EVENT_TEXT
 from ui.tank_sensitivity import TankSensitivity, VIEW as SENSITIVITY_VIEW
@@ -205,7 +205,7 @@ class TankPage(ttk.Frame):
             return dict({k:v.tolist() if isinstance(v,np.ndarray) else v for k,v in result.items()},source=origin["source"],origin=origin,revision=revision)
         def accept(result):
             self.fit=result; self.view.set("Идентификация")
-            self.summary.set(f"Локальная модель: K={result['gain']:.6g} с/м²; T={result['time_constant']:.6g} с; L={result['delay']:.6g} с; RMSE={result['rmse']:.4g} м. Подгонка не заменяет нелинейный бак.")
+            self.summary.set(f"Локальная модель: K={result['gain']:.6g} с/м²; T={result['time_constant']:.6g} с; L={result['delay']:.6g} с; RMSE всей записи={result['rmse']:.4g} м. Подгонка не заменяет нелинейный бак.\n" + quality_text(result))
             self.draw(); self.app._set_status("Идентификация бака выполнена")
         self.perform("Идентификация бака",calculate,accept)
 
@@ -222,7 +222,7 @@ class TankPage(ttk.Frame):
         fit=copy.deepcopy(self.fit); origin=copy.deepcopy(fit["origin"]); revision=self.revision
         def accept(result):
             self.validation=result; self.view.set("Проверка")
-            self.summary.set(f"Независимая запись: RMSE={result['rmse']:.5g} м; ошибка {result['normalized_rmse']*100:.3g}%. K/T/L сохранены. {result['warning']}")
+            self.summary.set(f"Независимая запись: RMSE всей записи={result['rmse']:.5g} м; ошибка {result['normalized_rmse']*100:.3g}%. K/T/L сохранены. {result['warning']}\n" + quality_text(result))
             self.draw(); self.app._set_status("Проверка бака выполнена")
         self.perform("Проверка бака",lambda cancel,progress:dict(validate_step(*arrays,fit,cancel=cancel),source=Path(path).name,origin=origin,revision=revision),accept)
 
@@ -280,6 +280,11 @@ class TankPage(ttk.Frame):
         app.response_chart_title.set(f"Бак: {view}")
         stale=record is not None and (record["revision"] != self.revision or (view=="PI" and record.get("configuration") != {k:self.fields[k].get() for k in ("gain","integral_time","setpoint")}))
         app.response_subtitle.set("Снимок прежних настроек; повторите расчёт." if stale else "Прогноз канала подачи; изменение отбора не учитывается." if view=="PI" else "Физический объект: A·dh/dt = Q − c√h − d; идеальный насос")
+        if record is not None and view in ("Идентификация", "Остаток", "Проверка"):
+            self.summary.set(("Снимок прежних настроек. " if stale else "")
+                + ("Независимая проверка; K/T/L сохранены. " if view=="Проверка" else "Локальная подгонка; не заменяет нелинейный бак. ")
+                + f"K={record['gain']:.6g} с/м²; T={record['time_constant']:.6g} с; L={record['delay']:.6g} с. "
+                + f"RMSE всей записи={record['rmse']:.5g} м.\n" + quality_text(record))
         for axis,canvas in ((app.disturbance_axis,app.disturbance_canvas),(app.response_axis,app.response_canvas)):
             axis.figure.set_layout_engine("none")
             axis.set_position((.11,.32,.87,.62))

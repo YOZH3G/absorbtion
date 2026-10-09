@@ -10,6 +10,93 @@ import numpy as np
 from .background_tasks import check_cancelled
 
 
+def step_quality(time, signal, output, model, gain, constant, delay, step_time):
+    """Descriptive checks on the observed response, without confidence claims."""
+    time, signal, output, model = (np.asarray(a, dtype=float) for a in (time, signal, output, model))
+    if (any(a.ndim != 1 or not np.isfinite(a).all() for a in (time, signal, output, model))
+            or not time.size == signal.size == output.size == model.size or time.size < 17
+            or np.any(np.diff(time) <= 0)
+            or not np.isfinite([gain, constant, delay, step_time]).all()
+            or gain == 0 or constant <= 0 or delay < 0):
+        raise ValueError("Неверные данные для показателей качества.")
+    index = int(np.searchsorted(time, step_time))
+    if index < 5 or time.size-index < 12 or time[index] != step_time or step_time+delay >= time[-1]:
+        raise ValueError("Неверный участок отклика для показателей качества.")
+    amplitude = float(np.median(signal[index:]) - np.median(signal[:index]))
+    scale = abs(gain * amplitude)
+    if not np.isfinite(scale) or scale <= 1e-12:
+        raise ValueError("Недостаточная амплитуда для показателей качества.")
+    start = step_time + delay
+    lower, upper = start - constant * np.log(.9), start - constant * np.log(.1)
+    transition = (time >= lower) & (time <= upper)
+    intervals = np.diff(time)[(time[:-1] < upper) & (time[1:] > lower)]
+    residual = output - model
+    response_time = np.r_[start, time[time > start]]
+    response_residual = np.interp(response_time, time, residual)
+    duration = float(response_time[-1] - start)
+    rmse = float(np.sqrt(np.trapezoid(response_residual**2, response_time) / duration))
+    bias = float(np.trapezoid(response_residual, response_time) / duration)
+    noise = float(np.std(output[:index]))
+    return dict(version=1, baseline_points=index, transition_points=int(np.count_nonzero(transition)),
+                duration_T=duration / constant, max_transition_gap=float(np.max(intervals)),
+                noise_std=noise, expected_amplitude=scale,
+                response_rmse=rmse, response_normalized_rmse=rmse / scale, response_bias=bias,
+                noise_adequate=bool(scale > max(5 * noise, 1e-10)),
+                error_acceptable=bool(rmse <= .1 * scale))
+
+
+def quality_text(record):
+    q = record.get("quality")
+    if q is None:
+        return "Показатели качества отсутствуют в старом результате; повторите расчёт."
+    return (f"RMSE отклика={q['response_rmse']:.5g}; ошибка отклика={q['response_normalized_rmse']*100:.3g}% "
+            f"(предел 10%: {'выполнен' if q['error_acceptable'] else 'превышен'}). "
+            f"После L: {q['duration_T']:.3g} T (минимум 3); точек перехода: {q['transition_points']} (минимум 5); "
+            f"максимальный интервал: {q['max_transition_gap']:.4g} с (предел T/2). "
+            f"Шум до ступени σ={q['noise_std']:.4g}; ожидаемая амплитуда={q['expected_amplitude']:.4g} "
+            f"({'выше 5σ' if q['noise_adequate'] else 'недостаточна относительно шума'}). "
+            f"Средний остаток отклика={q['response_bias']:.4g}.")
+
+
+def validate_step_quality(record):
+    """New snapshots carry diagnostics derived from their own signals."""
+    if "quality" not in record:
+        return
+    try:
+        for key in ("gain", "time_constant", "delay", "baseline", "step_time", "rmse", "normalized_rmse"):
+            value = record[key]
+            if type(value) not in (int, float) or not np.isfinite(value):
+                raise ValueError()
+        q = step_quality(*(record[k] for k in ("time", "input", "output", "model", "gain", "time_constant", "delay", "step_time")))
+        stored = record["quality"]
+        if not isinstance(stored, dict) or set(stored) != set(q):
+            raise ValueError()
+        for key, value in q.items():
+            actual = stored[key]
+            if isinstance(value, (bool, int)):
+                if type(actual) is not type(value) or actual != value:
+                    raise ValueError()
+            elif (type(actual) not in (int, float) or not np.isfinite(actual)
+                  or not np.isclose(actual, value, rtol=1e-10, atol=1e-12)):
+                raise ValueError()
+        t, u, y, model = (np.asarray(record[k], dtype=float) for k in ("time", "input", "output", "model"))
+        amplitude = float(np.median(u[t >= record["step_time"]]) - np.median(u[t < record["step_time"]]))
+        if "amplitude" in record and (type(record["amplitude"]) not in (int, float)
+                or not np.isclose(record["amplitude"], amplitude, rtol=1e-10, atol=1e-12)):
+            raise ValueError()
+        expected = record["baseline"] + record["gain"] * amplitude * -np.expm1(-np.maximum(t-record["step_time"]-record["delay"], 0)/record["time_constant"])
+        rmse = float(np.sqrt(np.trapezoid((y-model)**2, t)/np.ptp(t)))
+        if (not np.allclose(model, expected, rtol=1e-10, atol=1e-12)
+                or not np.allclose(y-model, record["residual"], rtol=1e-10, atol=1e-12)
+                or not np.isclose(record["rmse"], rmse, rtol=1e-10, atol=1e-12)
+                or not np.isclose(record["normalized_rmse"], rmse/q["expected_amplitude"], rtol=1e-10, atol=1e-12)
+                or q["baseline_points"] < 5 or q["transition_points"] < 5 or q["duration_T"] < 3
+                or q["max_transition_gap"] > record["time_constant"]/2):
+            raise ValueError()
+    except (KeyError, TypeError, ValueError, IndexError, ZeroDivisionError) as error:
+        raise ValueError("Эксперимент: показатели качества не соответствуют сигналам и модели.") from error
+
+
 def validate_experiment_origin(origin):
     if origin is None:
         return None
@@ -100,6 +187,7 @@ def validate_experiment_state(state):
         validate_experiment_origin(result.get("origin"))
         if not np.allclose(arrays[2] - arrays[3], arrays[4], rtol=1e-12, atol=1e-12):
             raise ValueError("Эксперимент: остаток не соответствует данным.")
+        validate_step_quality(result)
     elif state["result_current"]:
         raise ValueError("Эксперимент: нет актуального результата.")
     for key in ("data_revision", "result_revision"):
@@ -175,6 +263,8 @@ def validate_experiment_state(state):
                     raise ValueError("Эксперимент: показатели проверки PI вне допустимых границ.")
         if key == "pi_result" and (record.get("input_role") != "η, доля" or record.get("output_role") not in ("Xог, доля", "Xна, доля")):
             raise ValueError("Эксперимент: неизвестное назначение сигналов PI.")
+        if key == "validation":
+            validate_step_quality(record)
     if not isinstance(state.get("same_signals", False), bool):
         raise ValueError("Эксперимент: подтверждение сигналов должно быть логическим.")
     from .absorber_sensitivity import FIELD_DEFAULTS, parse_fields, validate_result
@@ -324,11 +414,13 @@ def identify_step(time, input_signal, output_signal, *, cancel=None, progress=No
     _loss, constant, delay, gain, offset = best
     model = offset + gain * amplitude * -np.expm1(-np.maximum(time - step_time - delay, 0) / constant)
     residual = output_signal - model
-    rmse = float(np.sqrt(np.mean(residual ** 2)))
+    rmse = float(np.sqrt(np.trapezoid(residual ** 2, time) / np.ptp(time)))
     scale = abs(gain * amplitude)
     transition = (time >= step_time + delay - constant * np.log(.9)) & (time <= step_time + delay - constant * np.log(.1))
     transition_times = time[transition]
-    if transition_times.size < 5 or constant < 2 * np.median(np.diff(transition_times)):
+    lower, upper = step_time + delay - constant * np.log(.9), step_time + delay - constant * np.log(.1)
+    gaps = np.diff(time)[(time[:-1] < upper) & (time[1:] > lower)]
+    if transition_times.size < 5 or constant < 2 * np.max(gaps):
         raise ValueError("Измерения слишком редкие: нужны минимум 5 точек между 10% и 90% отклика и T не меньше двух интервалов измерения.")
     initial_time = time[:index] - np.mean(time[:index])
     slope = float(np.dot(initial_time, baseline_output - np.mean(baseline_output)) / np.dot(initial_time, initial_time))
@@ -340,14 +432,17 @@ def identify_step(time, input_signal, output_signal, *, cancel=None, progress=No
         raise ValueError("Слишком короткий опыт: после запаздывания нужны минимум три найденные постоянные времени T.")
     if constant <= minimum * 1.01 or delay >= duration * .799:
         raise ValueError("Параметры достигли границы поиска: нужны более частые или более длинные измерения.")
-    if scale <= 1e-12 or rmse / scale > .1:
+    if scale <= 1e-12:
+        raise ValueError("Модель не описывает опыт: недостаточная амплитуда отклика.")
+    quality = step_quality(time, input_signal, output_signal, model, gain, constant, delay, step_time)
+    if not quality["error_acceptable"]:
         raise ValueError("Модель не описывает опыт: ошибка превышает 10% амплитуды отклика.")
     check_cancelled(cancel)
     return dict(time=time.copy(), input=input_signal.copy(), output=output_signal.copy(),
                 model=model, residual=residual, gain=gain, time_constant=constant, delay=delay,
                 baseline=offset, step_time=step_time, step_interval=[float(time[index - 1]), step_time],
                 amplitude=amplitude, rmse=rmse, normalized_rmse=rmse / scale,
-                method="one-step FOPDT; time-weighted least squares")
+                quality=quality, method="one-step FOPDT; time-weighted least squares")
 
 
 def export_identification(path, result, format_name):
