@@ -1,0 +1,47 @@
+{
+  "method": "Same machine, Python 3.14.7,1600x1000,actual Tk press/B1-Motion/release,20 movements per divider,10ms sleep between motions,unprofiled; motion wall excludes release; full draws include final release",
+  "baseline": {
+    "width": {
+      "wall_s": 10.749538700038102,
+      "max_event_s": 0.590505399974063,
+      "draws": [
+        20,
+        20
+      ],
+      "events": 20,
+      "release_s": 0.000860300031490624
+    },
+    "height": {
+      "wall_s": 2.111714700004086,
+      "max_event_s": 0.11302440002327785,
+      "draws": [
+        20,
+        20
+      ],
+      "events": 20,
+      "release_s": 0.0007210999610833824
+    }
+  },
+  "optimized": {
+    "width": {
+      "wall_s": 0.3204478000407107,
+      "max_event_s": 0.007989200006704777,
+      "draws": [
+        1,
+        1
+      ],
+      "events": 20,
+      "release_s": 0.1953958000522107
+    },
+    "height": {
+      "wall_s": 0.2360754999681376,
+      "max_event_s": 0.003716499952133745,
+      "draws": [
+        1,
+        1
+      ],
+      "events": 20,
+      "release_s": 0.07842540001729503
+    }
+  }
+}

@@ -121,6 +121,29 @@ def run_check(output_path, app_class, version):
             event = SimpleNamespace(inaxes=app.response_axis, xdata=30.)
             measure("cursor_move", lambda: (app.time_cursor.move(event), root.update_idletasks()))
             measure("cursor_clear", lambda: (app.time_cursor.clear(), root.update_idletasks()))
+            report["divider_drag"] = {}
+            for name, pane in (("width", app.main_panes), ("height", app.chart_panes)):
+                root.update()
+                horizontal = name == "width"
+                x, y = ((pane.sashpos(0), pane.winfo_height() // 2) if horizontal
+                        else (pane.winfo_width() // 2, pane.sashpos(0)))
+                pane.event_generate("<ButtonPress-1>", x=x, y=y)
+                root.update()
+                samples = []
+                for offset in (10, 20, 30, 20, 10):
+                    started = time.perf_counter()
+                    pane.event_generate("<B1-Motion>", x=x+offset if horizontal else x,
+                                        y=y if horizontal else y+offset, state=256)
+                    root.update()
+                    samples.append(time.perf_counter() - started)
+                started = time.perf_counter()
+                pane.event_generate("<ButtonRelease-1>", x=x+10 if horizontal else x,
+                                    y=y if horizontal else y+10)
+                root.update()
+                report["divider_drag"][name] = dict(motion_samples_s=samples,
+                    max_motion_s=max(samples), release_s=time.perf_counter()-started)
+                if len(app.chart_panes.panes()) != 2:
+                    raise RuntimeError("Both charts must remain visible after dragging")
             def switch_pages():
                 for name in ("results", "tank", "identification"):
                     app._show_page(name)

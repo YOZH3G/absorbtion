@@ -12,7 +12,7 @@ from matplotlib.colors import ListedColormap
 from matplotlib.figure import Figure
 
 APP_NAME = "Лаборатория динамики и управления"
-APP_VERSION = "1.12.0"
+APP_VERSION = "1.12.1"
 
 from app.calculations import (
     CONTROLLER_TYPES,
@@ -264,6 +264,7 @@ class DynamicsControlApp(ttk.Frame):
         self.controller_signal_mode = tk.StringVar(value="Ошибка и управление")
         self._page_context = {}
         self._layout_jobs = []
+        self._layout_drag_pane = None
 
         self._configure_window()
         self._configure_styles()
@@ -575,7 +576,53 @@ class DynamicsControlApp(ttk.Frame):
         self._set_chart_mode(self.chart_mode)
         self._schedule_layout(self._restore_layout)
         self.root.bind("<Configure>", self._adapt_window, add="+")
+        for pane in (self.main_panes, self.chart_panes):
+            pane.bind("<ButtonPress-1>", self._begin_layout_drag, add="+")
+            pane.bind("<B1-Motion>", self._move_layout_drag, add="+")
+            pane.bind("<ButtonRelease-1>", self._end_layout_drag, add="+")
+            pane.bind("<Unmap>", self._end_layout_drag, add="+")
+        self.root.bind("<ButtonRelease-1>", self._end_layout_drag, add="+")
         self._update_learning_route()
+
+    def _begin_layout_drag(self, event):
+        pane = event.widget
+        if pane.identify(event.x, event.y) not in (0, "0"):
+            return
+        self._layout_drag_pane = pane
+        horizontal = pane is self.main_panes
+        self._layout_drag_position = pane.sashpos(0)
+        self._layout_drag_offset = (event.x if horizontal else event.y) - self._layout_drag_position
+        self._layout_drag_marker = tk.Frame(pane, background=ACCENT)
+        self._place_layout_marker()
+        self.time_cursor.clear()
+        return "break"
+
+    def _place_layout_marker(self):
+        if self._layout_drag_pane is self.main_panes:
+            self._layout_drag_marker.place(x=self._layout_drag_position, y=0, width=3, relheight=1)
+        else:
+            self._layout_drag_marker.place(x=0, y=self._layout_drag_position, height=3, relwidth=1)
+        self._layout_drag_marker.lift()
+
+    def _move_layout_drag(self, event):
+        pane = self._layout_drag_pane
+        if pane is None:
+            return
+        horizontal = pane is self.main_panes
+        size = pane.winfo_width() if horizontal else pane.winfo_height()
+        self._layout_drag_position = max(0, min(size-5,
+            (event.x if horizontal else event.y) - self._layout_drag_offset))
+        self._place_layout_marker()
+        return "break"
+
+    def _end_layout_drag(self, _event=None):
+        pane = self._layout_drag_pane
+        if pane is None:
+            return
+        self._layout_drag_marker.destroy()
+        pane.sashpos(0, self._layout_drag_position)
+        self._layout_drag_pane = None
+        return "break"
 
     def _adapt_window(self, event):
         if event.widget != self.root:
@@ -649,6 +696,8 @@ class DynamicsControlApp(ttk.Frame):
         self._layout_jobs.append(job)
 
     def _restore_chart_split(self):
+        if self._layout_drag_pane is not None:
+            return
         if len(self.chart_panes.panes()) == 2:
             self.chart_panes.sashpos(0, int(self.chart_panes.winfo_height() * self.settings["chart_split"]))
 
@@ -657,6 +706,8 @@ class DynamicsControlApp(ttk.Frame):
             self._schedule_layout(self._restore_chart_split, delay=10)
 
     def _restore_layout(self):
+        if self._layout_drag_pane is not None:
+            return
         if len(self.main_panes.panes()) == 2:
             self.main_panes.sashpos(0, min(self.settings["inspector_width"], max(300, self.main_panes.winfo_width() - 320)))
         self._restore_chart_split()
@@ -732,12 +783,17 @@ class DynamicsControlApp(ttk.Frame):
         for widget in self.absorber_action_widgets:
             widget.grid_remove() if page == "model_result" or model.id != "absorber" else widget.grid()
         self.route_button.grid_remove() if page == "model_result" or model.id != "absorber" else self.route_button.grid()
+        for key, widget in self.pages.items():
+            if key != page:
+                widget.grid_remove()
+        self.pages[page].grid()
         self.pages[page].tkraise()
         if page in self._page_context:
             scroll, focus = self._page_context[page]
             self.pages[page].canvas.yview_moveto(scroll)
             if focus is not None and focus.winfo_exists():
-                focus.focus_set()
+                self._schedule_layout(lambda: focus.focus_set()
+                                      if self.current_page == page and focus.winfo_exists() else None)
         self.page_title.set(titles[page])
         if hasattr(self, "signal_mode_box"):
             available = (page not in ("comparison", "sensitivity", "tuning_map", "identification", "tank", "model_result")
@@ -3943,7 +3999,10 @@ class DynamicsControlApp(ttk.Frame):
         if legend is None:
             return
 
+        width = (axis.figure.bbox.width, axis.figure.dpi)
         def resized(_event):
+            if (axis.figure.bbox.width, axis.figure.dpi) == width:
+                return
             DynamicsControlApp._place_legend_above(axis, handles, labels)
             DynamicsControlApp._enable_legend_toggles(axis, canvas)
             canvas.draw_idle()

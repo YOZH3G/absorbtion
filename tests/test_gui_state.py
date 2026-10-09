@@ -15,6 +15,64 @@ from ui.scenario_editor import ScenarioEditorDialog
 
 
 class GuiStateTests(unittest.TestCase):
+    def test_internal_dividers_preview_then_apply_final_sizes(self):
+        from types import SimpleNamespace
+        import io
+        app, root = self.app, self.root
+        root.geometry("1366x900+0+0"); root.deiconify(); root.update()
+        app._set_chart_mode("both"); root.update()
+        for pane in (app.main_panes, app.chart_panes):
+            horizontal = pane is app.main_panes
+            legend = app.response_axis.get_legend()
+            x, y = ((pane.sashpos(0), pane.winfo_height() // 2) if horizontal
+                    else (pane.winfo_width() // 2, pane.sashpos(0)))
+            self.assertIn(pane.identify(x, y), (0, "0"))
+            canvases = (app.disturbance_canvas, app.response_canvas)
+            with patch.object(canvases[0], "draw", wraps=canvases[0].draw) as upper, \
+                    patch.object(canvases[1], "draw", wraps=canvases[1].draw) as lower:
+                pane.event_generate("<ButtonPress-1>", x=x, y=y); root.update()
+                self.assertIs(app._layout_drag_pane, pane)
+                original_position = pane.sashpos(0)
+                for offset in (10, 20, 30):
+                    pane.event_generate("<B1-Motion>", x=x+offset if horizontal else x,
+                                        y=y if horizontal else y+offset, state=256)
+                    root.update()
+                self.assertEqual(pane.sashpos(0), original_position)
+                upper.assert_not_called(); lower.assert_not_called()
+                pane.event_generate("<ButtonRelease-1>", x=x+30 if horizontal else x,
+                                    y=y if horizontal else y+30); root.update()
+                self.assertIsNone(app._layout_drag_pane)
+                self.assertEqual(pane.sashpos(0), original_position+30)
+                self.assertLessEqual(upper.call_count, 3); self.assertLessEqual(lower.call_count, 3)
+            for canvas in canvases:
+                widget = canvas.get_tk_widget()
+                self.assertEqual(canvas.get_width_height(physical=True),
+                                 (widget.winfo_width(), widget.winfo_height()))
+                self.assertTrue(widget.winfo_ismapped())
+            if not horizontal:
+                self.assertIs(app.response_axis.get_legend(), legend)
+        app.time_cursor.move(SimpleNamespace(inaxes=app.response_axis, xdata=30.))
+        root.update_idletasks(); self.assertIn("t = 30", app.chart_readouts[1].get())
+        png = io.BytesIO(); app.response_axis.figure.savefig(png, format="png", dpi=160)
+        self.assertTrue(png.getvalue().startswith(b"\x89PNG"))
+
+    def test_only_current_parameter_page_is_mapped_and_context_survives(self):
+        app, root = self.app, self.root
+        root.deiconify(); app._show_page("identification"); root.update()
+        page = app.pages["identification"]
+        entry = next(widget for widget in app.identification_page.winfo_children()
+                     if isinstance(widget, main.ttk.Entry))
+        entry.focus_force(); root.update()
+        page.canvas.yview_moveto(.3); root.update()
+        before = page.canvas.yview()[0]
+        app._show_page("results"); root.update()
+        self.assertFalse(page.winfo_ismapped())
+        self.assertEqual([name for name, widget in app.pages.items() if widget.winfo_ismapped()],
+                         ["results"])
+        app._show_page("identification"); root.update()
+        self.assertAlmostEqual(page.canvas.yview()[0], before, places=2)
+        self.assertIs(root.focus_get(), entry)
+
     def test_failed_background_autosave_preserves_file_and_retries(self):
         app = self.app
         app.root.after_cancel(app._autosave_job)
