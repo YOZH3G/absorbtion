@@ -76,7 +76,7 @@ def advance(level, pump, withdrawal, duration, p):
         if x <= -1:
             return math.inf
         if abs(x) < .001:
-            remainder = sum((-1)**(n+1)*x**n/n for n in range(2,10))
+            remainder = x*x*(-.5+x*(1/3+x*(-.25+x*(.2+x*(-1/6+x*(1/7+x*(-.125+x/9)))))))
         else:
             remainder = math.log1p(x)-x
         return 2*a/(c*c)*(-c*z0*x-b*remainder)

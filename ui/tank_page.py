@@ -299,13 +299,14 @@ class TankPage(ttk.Frame):
             canvas.draw_idle()
         app._charts_show_comparison=False
 
-    def capture(self):
-        return copy.deepcopy(dict(model_id=MODEL_ID,model_version=MODEL_VERSION,fields={k:v.get() for k,v in self.fields.items()},
+    def capture(self, *, copy_results=True):
+        snapshot = dict(model_id=MODEL_ID,model_version=MODEL_VERSION,fields={k:v.get() for k,v in self.fields.items()},
             revision=self.revision,view=self.view.get(),headers=self.headers,rows=self.rows,source=self.source,
             columns=[v.get() for v in self.columns],units=[v.get() for v in self.units],delimiter=self.delimiter.get(),same_signals=self.same_signals.get(),
             result=self.result,fit=self.fit,validation=self.validation,pi=self.pi,
             sensitivity_fields={k:v.get() for k,v in self.sensitivity.fields.items()},
-            sensitivity=self.sensitivity.result,selected_sensitivity=self.sensitivity.index()))
+            sensitivity=self.sensitivity.result,selected_sensitivity=self.sensitivity.index())
+        return copy.deepcopy(snapshot) if copy_results else snapshot
 
     def restore(self,state):
         state=validate_tank_state(state)

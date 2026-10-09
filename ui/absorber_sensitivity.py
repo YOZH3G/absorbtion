@@ -66,8 +66,9 @@ class AbsorberSensitivity(ttk.Frame):
         self.selected.set(labels[selected] if labels else "")
         for button in self.buttons: button.configure(state="normal" if labels else "disabled")
 
-    def capture(self):
-        return dict(fields=self.configuration(), result=copy.deepcopy(self.result), selected=self.index(), stale=self.stale())
+    def capture(self, *, copy_results=True):
+        return dict(fields=self.configuration(), result=copy.deepcopy(self.result) if copy_results else self.result,
+                    selected=self.index(), stale=self.stale())
 
     def restore(self, state):
         for key, var in self.fields.items(): var.set(state["fields"][key])

@@ -27,9 +27,9 @@ def write_session(path, runs, counter, laboratory=None):
         "version": FORMAT_VERSION,
         "comparison_counter": int(counter),
         "runs": [_serialize_run(run) for run in runs],
-        "laboratory": validate_laboratory(laboratory),
+        "laboratory": laboratory,
     }
-    _validate_payload(payload)
+    _runs, _counter, payload["laboratory"] = _validate_payload(payload)
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.with_suffix(destination.suffix + ".tmp")
     try:

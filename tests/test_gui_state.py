@@ -15,6 +15,93 @@ from ui.scenario_editor import ScenarioEditorDialog
 
 
 class GuiStateTests(unittest.TestCase):
+    def test_failed_background_autosave_preserves_file_and_retries(self):
+        app = self.app
+        app.root.after_cancel(app._autosave_job)
+        app._save_autosave()
+        original = app.autosave_path.read_bytes()
+        app.student_conclusion.set("Повторная запись")
+        with patch("main.write_session", side_effect=OSError("Disk unavailable")):
+            app._autosave_tick()
+            app._finish_autosave(wait=True)
+        self.assertEqual(app.autosave_path.read_bytes(), original)
+        self.assertIn("Disk unavailable", app.status_text.get())
+        app._autosave_tick()
+        app._finish_autosave(wait=True)
+        _, _, laboratory = read_laboratory_session(app.autosave_path)
+        self.assertEqual(laboratory["conclusion"], "Повторная запись")
+
+    def test_autosave_writer_keeps_tk_responsive_and_shutdown_saves_newer_data(self):
+        from threading import Event
+        from app.session_store import write_session as real_write
+        started, release = Event(), Event()
+        app = self.app
+        app.root.after_cancel(app._autosave_job)
+        def blocked_write(*args):
+            started.set()
+            if not release.wait(5): raise RuntimeError("Writer test timed out")
+            return real_write(*args)
+        try:
+            with patch("main.write_session", side_effect=blocked_write):
+                app._autosave_tick()
+                self.assertTrue(started.wait(2))
+                ticks = []
+                app.root.after(0, lambda: ticks.append(True)); app.root.update()
+                self.assertTrue(ticks)
+                app.student_conclusion.set("Изменено во время записи")
+                release.set(); app._finish_autosave(wait=True)
+            app._save_autosave()
+            _, _, restored = read_laboratory_session(app.autosave_path)
+            self.assertEqual(restored["conclusion"], "Изменено во время записи")
+            self.assertTrue(app.autosave_path.with_suffix(".json.bak").exists())
+            with patch("main.write_session") as writer:
+                app._save_autosave(); writer.assert_not_called()
+        finally:
+            release.set(); app._finish_autosave(wait=True)
+
+    def test_autosave_detects_nested_result_changes_without_json_signature(self):
+        page = self.prepare_absorber_errors()
+        app = self.app; app._save_autosave()
+        original = app.autosave_path.read_bytes()
+        with patch("main.json.dumps", side_effect=AssertionError("No JSON comparison")):
+            app._save_autosave()
+        page.result["quality"]["response_rmse"] = 123.
+        app._save_autosave()
+        self.assertEqual(app.autosave_path.read_bytes(), original)
+        self.assertIn("качества", app.status_text.get())
+
+    def test_cursor_uses_blit_and_prunes_removed_axes(self):
+        from types import SimpleNamespace
+        app = self.app
+        event = SimpleNamespace(inaxes=app.response_axis, xdata=20.)
+        app.time_cursor.move(event); self.root.update_idletasks()
+        with patch.object(app.response_canvas, "draw", wraps=app.response_canvas.draw) as draw:
+            event.xdata = 25.; app.time_cursor.move(event); self.root.update_idletasks()
+            app.time_cursor.clear(); self.root.update_idletasks()
+            app.time_cursor.clear(); self.root.update_idletasks()
+            draw.assert_not_called()
+        twin = app.response_axis.twinx(); app.response_canvas.draw()
+        app.time_cursor.move(event); self.root.update_idletasks()
+        self.assertIn(twin, app.time_cursor.markers)
+        app.response_axis.figure.delaxes(twin); app.response_canvas.draw()
+        self.assertNotIn(twin, app.time_cursor.markers)
+        app.response_axis.set_xlim(0, 40); app.response_canvas.draw()
+        event.xdata = 30.; app.time_cursor.move(event)
+        self.assertIn("t = 30", app.chart_readouts[1].get())
+
+    def test_small_wheel_deltas_accumulate_and_same_layout_is_skipped(self):
+        from types import SimpleNamespace
+        app = self.app; page = app.pages["identification"]
+        app._show_page("identification"); self.root.update_idletasks()
+        page._scrolling_enabled = True
+        with patch.object(page.canvas, "yview_scroll") as scroll:
+            for _ in range(4): page._on_mousewheel(SimpleNamespace(delta=-30))
+            scroll.assert_called_once_with(1, "units")
+        event = SimpleNamespace(widget=self.root, width=1366, height=900)
+        app._adapt_window(event)
+        with patch.object(app.comparison_table, "configure") as table:
+            app._adapt_window(event); table.assert_not_called()
+
     def test_identification_quality_is_visible_saved_and_checked(self):
         from app.identification import validate_experiment_state
         from app.exporting import write_experiment_report
@@ -857,6 +944,8 @@ class GuiStateTests(unittest.TestCase):
         self.assertEqual(list(app.nav_buttons)[:3], ["scenarios", "disturbances", "dynamics"])
 
     def tearDown(self):
+        if hasattr(self, "app"):
+            self.app._finish_autosave(wait=True)
         if hasattr(self, "root"):
             self.root.update_idletasks()
             for callback in self.root.tk.splitlist(self.root.tk.call("after", "info")):

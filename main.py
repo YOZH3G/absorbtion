@@ -12,7 +12,7 @@ from matplotlib.colors import ListedColormap
 from matplotlib.figure import Figure
 
 APP_NAME = "Лаборатория динамики и управления"
-APP_VERSION = "1.11.0"
+APP_VERSION = "1.12.0"
 
 from app.calculations import (
     CONTROLLER_TYPES,
@@ -287,7 +287,8 @@ class DynamicsControlApp(ttk.Frame):
         if self.scenario_store.warning:
             self._set_status(self.scenario_store.warning, error=True)
         self.autosave_path = self.scenario_store.path.with_name("laboratory.autosave.json")
-        self._autosave_signature = None
+        self._autosave_snapshot = None
+        self._autosave_task = None
         self._restore_autosave()
         self._show_page(self.current_page)
         self._autosave_job = self.root.after(5000, self._autosave_tick)
@@ -580,16 +581,28 @@ class DynamicsControlApp(ttk.Frame):
         if event.widget != self.root:
             return
         scale = float(self.root.tk.call("tk", "scaling")) / (96 / 72)
+        size = (event.width, event.height, scale)
+        if size == getattr(self, "_adapt_size", None):
+            return
+        self._adapt_size = size
         if event.width < 1240 * scale and not self.sidebar_collapsed:
             self.sidebar_collapsed = True
             self._apply_sidebar_state()
         nav_padding = max(2, min(9, int((event.height / scale - 560) / 28)))
-        for style_name in ("SidebarNav.TButton", "SelectedSidebarNav.TButton"):
-            ttk.Style(self.root).configure(style_name, padding=(18, nav_padding))
+        if nav_padding != getattr(self, "_nav_padding", None):
+            self._nav_padding = nav_padding
+            for style_name in ("SidebarNav.TButton", "SelectedSidebarNav.TButton"):
+                ttk.Style(self.root).configure(style_name, padding=(18, nav_padding))
         line_height = int(self.root.tk.call("font", "metrics", "TkDefaultFont", "-linespace")) + 4
-        ttk.Style(self.root).configure("Treeview", rowheight=line_height)
-        self.comparison_table.configure(height=max(3, min(6, int((event.height - 500 * scale) / line_height))))
-        self.comparison_workspace.canvas.configure(height=max(140, int((event.height - 140 * scale) * 0.43)))
+        if line_height != getattr(self, "_table_row_height", None):
+            self._table_row_height = line_height
+            ttk.Style(self.root).configure("Treeview", rowheight=line_height)
+        table_height = max(3, min(6, int((event.height - 500 * scale) / line_height)))
+        if table_height != int(self.comparison_table["height"]):
+            self.comparison_table.configure(height=table_height)
+        canvas_height = max(140, int((event.height - 140 * scale) * 0.43))
+        if canvas_height != int(self.comparison_workspace.canvas["height"]):
+            self.comparison_workspace.canvas.configure(height=canvas_height)
         if event.height < 850 * scale and self.chart_mode == "both" and self.current_page != "comparison":
             self._set_chart_mode("response")
 
@@ -2485,6 +2498,7 @@ class DynamicsControlApp(ttk.Frame):
         if not selected:
             return
         try:
+            self._finish_autosave(wait=True)
             path = write_session(selected, self.comparison_runs, self.comparison_counter, self._capture_laboratory())
         except (OSError, ValueError, TypeError) as error:
             self._set_status(f"Не удалось сохранить сеанс: {error}", error=True)
@@ -2531,7 +2545,7 @@ class DynamicsControlApp(ttk.Frame):
     def _export_comparison_graphs(self):
         self._export_graphs_png()
 
-    def _capture_laboratory(self):
+    def _capture_laboratory(self, *, copy_results=True):
         calculation = self.last_calculation
         snapshot = None if calculation is None else {
             key: copy.deepcopy(calculation[key])
@@ -2552,10 +2566,10 @@ class DynamicsControlApp(ttk.Frame):
             "evaluation": copy.deepcopy(self.assignment_evaluation), "student_name": self.student_name.get(),
             "conclusion": self.student_conclusion.get(), "page": self.current_page,
             "selected_runs": list(self.comparison_table.selection()), "last_calculation": snapshot,
-            "identification": self.identification_page.capture(),
+            "identification": self.identification_page.capture(validate=False, copy_results=copy_results),
             "selected_model": MODELS.named(self.selected_model.get()).id,
-            "model_results": copy.deepcopy(self.model_results),
-            "tank": self.tank_page.capture(),
+            "model_results": copy.deepcopy(self.model_results) if copy_results else self.model_results,
+            "tank": self.tank_page.capture(copy_results=copy_results),
         }
 
     def _restore_laboratory(self, laboratory, result):
@@ -2627,19 +2641,50 @@ class DynamicsControlApp(ttk.Frame):
         self.calculate_button_text.set("Проверить прогноз" if self.assignment_enabled.get()
                                        else "Пересчитать" if result is not None else "Рассчитать")
 
+    def _autosave_state(self):
+        return (self._capture_laboratory(copy_results=False),
+                [(run["id"], run["name"]) for run in self.comparison_runs], self.comparison_counter)
+
+    def _finish_autosave(self, *, wait=False):
+        task = self._autosave_task
+        if task is None:
+            return
+        if wait:
+            task.thread.join()
+        outcome = task.poll()
+        if outcome is not None:
+            self._autosave_task = None
+            snapshot, error = outcome
+            if error is None:
+                self._autosave_snapshot = snapshot
+            else:
+                self._set_status(f"Не удалось автоматически сохранить лабораторную: {error}", error=True)
+
     def _save_autosave(self):
+        # Explicit saves and shutdown wait for the writer before saving newer data.
+        self._finish_autosave(wait=True)
         try:
-            laboratory = self._capture_laboratory()
-            signature = json.dumps((laboratory, [(run["id"], run["name"]) for run in self.comparison_runs],
-                                    self.comparison_counter), ensure_ascii=False, sort_keys=True)
-            if signature != self._autosave_signature:
-                write_session(self.autosave_path, self.comparison_runs, self.comparison_counter, laboratory)
-                self._autosave_signature = signature
+            state = self._autosave_state()
+            if state != self._autosave_snapshot:
+                snapshot = copy.deepcopy(state)
+                write_session(self.autosave_path, self.comparison_runs, self.comparison_counter, snapshot[0])
+                self._autosave_snapshot = snapshot
         except (OSError, ValueError, TypeError) as error:
             self._set_status(f"Не удалось автоматически сохранить лабораторную: {error}", error=True)
 
     def _autosave_tick(self):
-        self._save_autosave()
+        self._finish_autosave()
+        if self._autosave_task is None:
+            try:
+                state = self._autosave_state()
+                if state != self._autosave_snapshot:
+                    snapshot, runs = copy.deepcopy(state), copy.deepcopy(self.comparison_runs)
+                    def save(cancel, progress):
+                        write_session(self.autosave_path, runs, snapshot[2], snapshot[0])
+                        return snapshot
+                    self._autosave_task = BackgroundTask(save)
+            except (OSError, ValueError, TypeError) as error:
+                self._set_status(f"Не удалось автоматически сохранить лабораторную: {error}", error=True)
         self._autosave_job = self.root.after(5000, self._autosave_tick)
 
     def _restore_autosave(self):
@@ -4217,6 +4262,9 @@ def _run_release_check(output_path):
 
 
 def main():
+    if len(sys.argv) == 3 and sys.argv[1] == "--performance-check":
+        from app.performance import run_check
+        raise SystemExit(run_check(sys.argv[2], DynamicsControlApp, APP_VERSION))
     if len(sys.argv) == 3 and sys.argv[1] == "--smoke-test":
         raise SystemExit(_run_release_check(sys.argv[2]))
     root = tk.Tk()

@@ -452,6 +452,10 @@ class ScrollablePage(ttk.Frame):
         self.content.bind("<Configure>", self._update_scroll_region)
         self.canvas.bind("<Configure>", self._fit_content_width)
         self._scrolling_enabled = False
+        self._wheel_remainder = 0
+        self._content_width = None
+        self._scroll_region = None
+        self._horizontal_scrolling_enabled = None
 
     def bind_mousewheel(self):
         self.canvas.bind("<MouseWheel>", self._on_mousewheel, add="+")
@@ -461,20 +465,29 @@ class ScrollablePage(ttk.Frame):
         self.canvas.yview_moveto(0.0)
 
     def _update_scroll_region(self, _event=None):
-        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+        bounds = self.canvas.bbox("all")
+        if bounds != self._scroll_region:
+            self._scroll_region = bounds
+            self.canvas.configure(scrollregion=bounds)
         self._update_scroll_state()
 
     def _fit_content_width(self, event):
-        self.canvas.itemconfigure(self._window_id, width=max(event.width, self.content.winfo_reqwidth()))
+        width = max(event.width, self.content.winfo_reqwidth())
+        if width != self._content_width:
+            self._content_width = width
+            self.canvas.itemconfigure(self._window_id, width=width)
         self._update_scroll_state()
 
     def _update_scroll_state(self):
         bounds = self.canvas.bbox("all")
-        if bounds is not None and bounds[2] - bounds[0] > self.canvas.winfo_width():
-            self.horizontal_scrollbar.grid()
-        else:
-            self.horizontal_scrollbar.grid_remove()
-            self.canvas.xview_moveto(0.0)
+        horizontal = bounds is not None and bounds[2] - bounds[0] > self.canvas.winfo_width()
+        if horizontal != self._horizontal_scrolling_enabled:
+            self._horizontal_scrolling_enabled = horizontal
+            if horizontal:
+                self.horizontal_scrollbar.grid()
+            else:
+                self.horizontal_scrollbar.grid_remove()
+                self.canvas.xview_moveto(0.0)
         content_height = 0 if bounds is None else bounds[3] - bounds[1]
         should_scroll = content_height > self.canvas.winfo_height()
         if should_scroll == self._scrolling_enabled:
@@ -490,7 +503,11 @@ class ScrollablePage(ttk.Frame):
     def _on_mousewheel(self, event):
         if not self._scrolling_enabled:
             return
-        self.canvas.yview_scroll(int(-event.delta / 120), "units")
+        self._wheel_remainder -= event.delta
+        units = int(self._wheel_remainder / 120)
+        self._wheel_remainder -= units * 120
+        if units:
+            self.canvas.yview_scroll(units, "units")
         return "break"
 
     def _bind_descendants(self, widget):
